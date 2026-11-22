@@ -36,9 +36,9 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -66,8 +66,25 @@ jobs:
         id: deploy
         working-directory: worker
         run: |
+          set -o pipefail
           npx wrangler deploy 2>&1 | tee deploy.log
-          url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -n 1)
+          url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -n 1 || true)
+          if [ -z "$url" ]; then
+            echo "Keine Adresse in der Ausgabe gefunden – frage die workers.dev-Subdomain bei Cloudflare ab."
+            sub=$(curl -fsS "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+                    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result.subdomain // empty' || true)
+            if [ -n "$sub" ]; then
+              url="https://wichteln-api.$sub.workers.dev"
+              # workers.dev für diesen Worker sicher einschalten
+              curl -fsS -X POST "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/wichteln-api/subdomain" \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+                --data '{"enabled":true,"previews_enabled":false}' > /dev/null || true
+            else
+              echo "::error::Dein Cloudflare-Konto hat noch keine workers.dev-Subdomain. Öffne im Cloudflare-Dashboard 'Workers & Pages', richte die Subdomain ein (ein Name genügt) und starte den Workflow neu."
+              exit 1
+            fi
+          fi
+          echo "Worker-Adresse: $url"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: Admin-Passwort hinterlegen
@@ -82,7 +99,7 @@ jobs:
       name: github-pages
       url: ${{ steps.pages.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: API-Adresse eintragen
         env:
