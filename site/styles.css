@@ -411,6 +411,8 @@ details[open].field summary { margin-bottom: 4px; }
 input:not([type='checkbox']):not([type='radio']), textarea, select {
   width: 100%;
   background: #fff;
+  color: var(--fir); /* nie die Textfarbe dunkler Kästen erben */
+  caret-color: var(--berry);
   border: 1.5px solid var(--mist-strong);
   border-radius: 10px;
   padding: 10px 12px;
