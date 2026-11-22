@@ -57,14 +57,10 @@ function normalize(list) {
   return out;
 }
 
+// Hinweis: SerpApi nimmt Amazons Preisfilter (rh=p_36) nicht an. Wir filtern den Preis
+// deshalb selbst und sortieren bei gesetztem Budget, damit trotzdem genug Treffer passen.
 async function viaSerpApi(key, args) {
-  try {
-    return await serpApiCall(key, args, true);
-  } catch (e) {
-    // Falls SerpApi den Preis-Filter (rh) nicht annimmt: ohne Filter, wir filtern danach selbst
-    if (args.min != null || args.max != null) return serpApiCall(key, args, false);
-    throw e;
-  }
+  return serpApiCall(key, args, false);
 }
 
 async function serpApiCall(key, { q, page, sort, min, max }, withPrice) {
