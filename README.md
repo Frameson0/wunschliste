@@ -28,11 +28,12 @@ scripts/   Hilfsskript für das Deployment
 1. Kostenloses Konto anlegen auf [dash.cloudflare.com](https://dash.cloudflare.com/sign-up).
 2. Links **Workers & Pages** (bzw. „Compute“) einmal öffnen. Dabei bekommt dein Konto seine `workers.dev`-Adresse. Wenn Cloudflare dich nach einem Subdomain-Namen fragt, such dir einen aus.
 3. **Account-ID kopieren:** Sie steht auf der Übersichtsseite von Workers & Pages rechts („Account ID“). Alternativ steht sie in der Adresszeile: `dash.cloudflare.com/<ACCOUNT-ID>/…`.
-4. **API-Token erstellen:** Oben rechts auf dein Profil → **My Profile** → **API Tokens** → **Create Token**.
-   - Bei der Vorlage **„Edit Cloudflare Workers“** auf **Use template** klicken.
-   - Unter **Permissions** mit **+ Add more** eine Zeile ergänzen: `Account` · `D1` · `Edit`.
-   - Unter **Account Resources** dein Konto auswählen, bei **Zone Resources** „All zones“ lassen.
-   - **Continue to summary** → **Create Token** → Token kopieren. Er wird nur einmal angezeigt.
+4. **API-Token erstellen:** **Manage Account** (bzw. dein Profil) → **API Tokens** → **Create Token**.
+   - Token-Name z. B. `wichteln`, bei **Policies** die Vorlage **„Edit Cloudflare Workers“** wählen.
+   - Falls nach dem Konto gefragt wird: dein Konto auswählen.
+   - **Continue to summary** → **Create token** → Token kopieren. Er wird nur einmal angezeigt.
+
+   Die Datenbank (D1, Name `wichteln`) ist bereits angelegt und in `worker/wrangler.toml` eingetragen. Wenn später neue Dateien in `worker/migrations/` dazukommen, braucht der Token zusätzlich `Account · D1 · Edit`, damit der Workflow sie einspielen kann.
 
 ### 2. Secrets bei GitHub eintragen
 

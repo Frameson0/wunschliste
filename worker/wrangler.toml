@@ -2,10 +2,8 @@ name = "wichteln-api"
 main = "src/index.js"
 compatibility_date = "2026-11-01"
 
-# Die database_id wird beim automatischen Deployment (GitHub Actions)
-# eingetragen. Für lokales Testen ist der Platzhalter in Ordnung.
 [[d1_databases]]
 binding = "DB"
 database_name = "wichteln"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "f53dc094-aa80-4306-9b22-18d5478fcda4"
 migrations_dir = "migrations"

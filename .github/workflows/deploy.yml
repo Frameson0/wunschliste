@@ -48,11 +48,18 @@ jobs:
         working-directory: worker
         run: npm ci
 
-      - name: Datenbank anlegen (nur beim ersten Mal)
-        run: node scripts/ensure-d1.mjs
+      - name: Datenbank anlegen (nur falls noch keine eingetragen ist)
+        run: |
+          if grep -q '00000000-0000-0000-0000-000000000000' worker/wrangler.toml; then
+            node scripts/ensure-d1.mjs
+          else
+            echo "Datenbank ist bereits in wrangler.toml eingetragen."
+          fi
 
       - name: Datenbank auf den neuesten Stand bringen
         working-directory: worker
+        # Braucht die Token-Berechtigung "D1 · Edit". Fehlt sie, läuft der Rest trotzdem weiter.
+        continue-on-error: true
         run: npx wrangler d1 migrations apply wichteln --remote
 
       - name: Worker veröffentlichen
