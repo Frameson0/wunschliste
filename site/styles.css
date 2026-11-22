@@ -145,7 +145,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
   box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--c) 70%, #000);
   transition: box-shadow 0.2s;
 }
-.bauble.is-light .bauble__ball { color: var(--fir); }
+.bauble.is-light .bauble__ball { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
 .bauble__name {
   margin-top: 8px;
   font-size: 0.95rem;
