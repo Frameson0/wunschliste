@@ -188,9 +188,39 @@ function archiveBanner() {
     ${cur ? `<button class="btn btn--small btn--ghost-dark" data-act="round" data-id="">Zurück zu ${esc(cur.title)}</button>` : ''}</div>`;
 }
 
+const REINDEER_SVG = `
+<svg class="reindeer" viewBox="0 0 120 130" aria-hidden="true">
+  <g fill="none" stroke="#7a5333" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M42 40 C36 26 30 18 22 10 M33 26 L20 26 M37 32 L28 38"/>
+    <path d="M78 40 C84 26 90 18 98 10 M87 26 L100 26 M83 32 L92 38"/>
+  </g>
+  <ellipse cx="33" cy="50" rx="10" ry="5.5" fill="#8b5e3c" transform="rotate(-25 33 50)"/>
+  <ellipse cx="87" cy="50" rx="10" ry="5.5" fill="#8b5e3c" transform="rotate(25 87 50)"/>
+  <path d="M60 36 C80 36 88 52 86 70 C84 90 74 104 60 104 C46 104 36 90 34 70 C32 52 40 36 60 36 Z" fill="#9a6a45"/>
+  <ellipse cx="60" cy="88" rx="17" ry="15" fill="#e2c29f"/>
+  <circle cx="50" cy="62" r="4.2" fill="#123b2f"/><circle cx="70" cy="62" r="4.2" fill="#123b2f"/>
+  <circle cx="51.3" cy="60.6" r="1.4" fill="#fff"/><circle cx="71.3" cy="60.6" r="1.4" fill="#fff"/>
+  <circle cx="60" cy="80" r="7" fill="#c42f45"/><circle cx="57.6" cy="77.6" r="2" fill="#fff" opacity=".55"/>
+  <path d="M54 93 Q60 98 66 93" fill="none" stroke="#7a5333" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M44 104 Q60 114 76 104 L80 126 Q60 132 40 126 Z" fill="#9a6a45"/>
+  <path d="M46 106 Q60 113 74 106" fill="none" stroke="#c42f45" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="60" cy="113" r="3.6" fill="#e3a82b"/>
+</svg>`;
+
+function helper() {
+  return `
+  <div class="helper-wrap">
+    <button class="helper" type="button" data-act="tour" aria-label="Hilfe: Wie geht das alles? Kurze Anleitung starten">
+      ${REINDEER_SVG}
+      <span class="helper__sign" aria-hidden="true"><span>Hilfe!</span> Wie geht das alles?</span>
+    </button>
+  </div>`;
+}
+
 function footer() {
   const rounds = S.data ? S.data.rounds : [];
   return `
+  ${helper()}
   <footer class="footer">
     ${
       rounds.length > 1
@@ -535,7 +565,7 @@ function viewPerson(id) {
       <h1 class="profile__title">${own ? 'Dein Wunschzettel' : `${esc(genitive(p.name))} Wunschzettel`}</h1>
       ${!isMember ? `<p class="note">${esc(p.name)} macht bei ${esc(round().title)} nicht mit.</p>` : ''}
       ${canEdit ? addBox() : ''}
-      <section class="sheet paper"><div class="paper__inner">
+      <section class="sheet paper" id="my-list"><div class="paper__inner">
         <h2 class="sr">Ideen</h2>
         ${its.length ? `<ul class="items">${its.map((it) => itemRow(it, own)).join('')}</ul>` : `<p class="empty">${empty}</p>`}
       </div></section>
@@ -690,7 +720,7 @@ function render() {
 
 function busyTyping() {
   const a = document.activeElement;
-  return Boolean(S.draft || S.editing || S.sheet.open || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
+  return Boolean(S.draft || S.editing || S.sheet.open || S.tour || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
 }
 
 async function refresh({ quiet = false } = {}) {
@@ -752,6 +782,10 @@ const actions = {
     else location.hash = `#/p/${S.me}`;
   },
   'sheet-open'(el) { openSheet(el); },
+  tour() { startTour(); },
+  'tour-next'() { tourGo(1); },
+  'tour-back'() { tourGo(-1); },
+  'tour-close'() { endTour(); },
   'sheet-close'() { closeSheet(); },
   'sheet-cat'(el) {
     S.sheet.cat = S.sheet.cat === el.dataset.id ? '' : el.dataset.id;
@@ -1240,6 +1274,134 @@ function processShare() {
   loadPreview(share.url, share.title);
 }
 
+// ---------- Kleine Anleitung (Rentier) ----------
+
+function tourSteps() {
+  if (!S.me) {
+    return [
+      { sel: '.garland', title: 'Wer bist du?', text: 'Jede Kugel ist eine Person aus der Familie. Tipp auf die Kugel mit deinem Namen.' },
+      { sel: '.helper', title: 'Danach geht es weiter', text: 'Wenn du deine Kugel angetippt hast, drück noch einmal auf mich. Dann zeige ich dir den Rest.' },
+    ];
+  }
+  const me = person(S.me);
+  return [
+    { sel: '.garland', title: 'Das ist die Familie', text: `Jede Kugel ist eine Person. Deine Kugel ist mit „du“ markiert, ${esc(me ? me.name : '')}.` },
+    { sel: '.finder', title: 'Wünsche finden', text: 'Schreib hier hinein, was du dir wünschst, zum Beispiel „Tee“. Dann tippst du auf „Suchen“.' },
+    {
+      sel: '.finder',
+      title: 'Auf die Liste setzen',
+      text: 'Dann erscheinen Bilder von passenden Artikeln. Gefällt dir einer, tippst du darunter auf diesen Knopf:',
+      demo: '<span class="tour__demo">Auf meine Liste</span><span class="tour__demo-hint">Fertig! Mehr ist es nicht.</span>',
+    },
+    { sel: '.add', title: 'Etwas aus einem anderen Laden?', text: 'Kopier im Laden den Link. Dann tippst du hier auf „Kopierten Link einfügen“. Du kannst auch eine Idee ohne Link aufschreiben.' },
+    { sel: '#my-list', title: 'Dein Wunschzettel', text: 'Hier steht alles, was du dir wünschst. Mit dem Stern ☆ markierst du deinen größten Wunsch. Mit „Löschen“ nimmst du etwas wieder herunter.' },
+    { sel: '.about', title: 'Gut zu wissen', text: 'Schreib hier Größen und Vorlieben auf, zum Beispiel deine Schuhgröße. Danach auf „Speichern“ tippen.' },
+    { sel: '.garland', title: 'Geschenk für jemand anderen', text: 'Tipp oben auf die Kugel der Person, die du beschenkst. Dann siehst du ihre Wünsche. Niemand sieht, wen du beschenkst.' },
+    { sel: '.helper', title: 'Das war’s!', text: 'Wenn du wieder Hilfe brauchst, drück einfach auf mich. Frohe Weihnachten!' },
+  ];
+}
+
+const tourReduce = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function startTour() {
+  if (S.sheet.open) closeSheet();
+  const r = route();
+  if (S.me && (r.view !== 'person' || r.id !== S.me)) {
+    location.hash = `#/p/${S.me}`;
+  }
+  setTimeout(() => {
+    const steps = tourSteps().filter((st) => document.querySelector(st.sel));
+    if (!steps.length) return;
+    S.tour = { steps, i: 0 };
+    let root = $('#tour-root');
+    if (!root) {
+      root = document.createElement('div');
+      root.id = 'tour-root';
+      document.body.appendChild(root);
+    }
+    showTourStep();
+  }, 60);
+}
+
+function endTour() {
+  S.tour = null;
+  const root = $('#tour-root');
+  if (root) root.innerHTML = '';
+  window.removeEventListener('resize', placeTour);
+  window.removeEventListener('scroll', placeTour, true);
+  const h = $('.helper');
+  if (h) h.focus({ preventScroll: true });
+}
+
+function tourGo(d) {
+  if (!S.tour) return;
+  const next = S.tour.i + d;
+  if (next >= S.tour.steps.length) return endTour();
+  if (next < 0) return;
+  S.tour.i = next;
+  showTourStep();
+}
+
+function showTourStep() {
+  const { steps, i } = S.tour;
+  const st = steps[i];
+  const last = i === steps.length - 1;
+  $('#tour-root').innerHTML = `
+    <div class="tour" role="dialog" aria-modal="true" aria-labelledby="tour-title" aria-describedby="tour-text">
+      <div class="tour__block"></div>
+      <div class="tour__spot" aria-hidden="true"></div>
+      <div class="tour__bubble">
+        <div class="tour__top">${REINDEER_SVG}<span class="tour__count">Schritt ${i + 1} von ${steps.length}</span></div>
+        <h2 id="tour-title">${st.title}</h2>
+        <p id="tour-text">${st.text}</p>
+        ${st.demo || ''}
+        <div class="tour__btns">
+          ${i > 0 ? '<button class="btn btn--ghost tour__btn" type="button" data-act="tour-back">Zurück</button>' : ''}
+          <button class="btn btn--primary tour__btn" type="button" data-act="tour-next">${last ? 'Fertig' : 'Weiter'}</button>
+        </div>
+        ${last ? '' : '<button class="tour__close" type="button" data-act="tour-close">Anleitung beenden</button>'}
+      </div>
+    </div>`;
+  const target = document.querySelector(st.sel);
+  if (target) {
+    // Ziel oben ins Bild holen, die Sprechblase steht dann unten daneben
+    const r = target.getBoundingClientRect();
+    const bh = $('.tour__bubble').offsetHeight;
+    const free = window.innerHeight - bh - 48;
+    const offset = r.height <= free ? 24 : Math.max(24, (window.innerHeight - r.height) / 2);
+    window.scrollTo({ top: window.scrollY + r.top - offset, behavior: tourReduce() ? 'auto' : 'smooth' });
+  }
+  placeTour();
+  setTimeout(placeTour, tourReduce() ? 0 : 420);
+  window.addEventListener('resize', placeTour);
+  window.addEventListener('scroll', placeTour, true);
+  $('[data-act="tour-next"]').focus({ preventScroll: true });
+}
+
+function placeTour() {
+  if (!S.tour) return;
+  const st = S.tour.steps[S.tour.i];
+  const target = document.querySelector(st.sel);
+  const spot = $('.tour__spot');
+  const bubble = $('.tour__bubble');
+  if (!spot || !bubble) return;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  if (!target) { spot.style.opacity = '0'; return; }
+  const r = target.getBoundingClientRect();
+  const pad = 8;
+  const top = Math.max(r.top - pad, 6);
+  const left = Math.max(r.left - pad, 6);
+  const bottom = Math.min(r.bottom + pad, vh - 6);
+  const right = Math.min(r.right + pad, vw - 6);
+  Object.assign(spot.style, { opacity: '1', top: `${top}px`, left: `${left}px`, width: `${Math.max(right - left, 0)}px`, height: `${Math.max(bottom - top, 0)}px` });
+  // Sprechblase dorthin, wo Platz ist
+  const bh = bubble.offsetHeight;
+  const spaceBelow = vh - bottom;
+  const spaceAbove = top;
+  bubble.classList.toggle('is-top', spaceBelow < bh + 24 && spaceAbove > spaceBelow);
+}
+
 // ---------- Events ----------
 
 document.addEventListener('click', (ev) => {
@@ -1283,6 +1445,7 @@ document.addEventListener('paste', (ev) => {
 
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape') {
+    if (S.tour) { endTour(); return; }
     if (S.sheet.open) { closeSheet(); return; }
     if (S.editing) { S.editing = null; render(); }
     else if (S.draft && !S.draft.loading) { S.draft = null; render(); }
