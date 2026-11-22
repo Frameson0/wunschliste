@@ -313,23 +313,12 @@ function addBox() {
   }
   const busy = d && d.loading ? 'disabled' : '';
   const search = S.data.features && S.data.features.amazonSearch;
-  return `
-  <section class="add paper"><div class="paper__inner">
-    <h2>Neue Idee</h2>
-    ${
-      search
-        ? `<button class="amazon-cta" type="button" data-act="sheet-open">
-            <span class="amazon-cta__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></svg></span>
-            <span><strong>Bei Amazon stöbern</strong><span class="amazon-cta__sub">Suchen, filtern und mit einem Tippen auf die Liste setzen</span></span>
-          </button>
-          <p class="add__divider"><span>oder Link aus einem anderen Shop</span></p>`
-        : ''
-    }
+  const linkPart = `
     <form class="add__form" data-form="preview">
-      <label for="add-url">${search ? 'Link einfügen' : 'Link aus dem Shop einfügen'}</label>
+      <label for="add-url">Link einfügen</label>
       <div class="add__row">
         <input id="add-url" type="url" inputmode="url" autocomplete="off" placeholder="https://…" ${busy}>
-        <button class="btn btn--primary" type="submit" ${busy}>Vorschau holen</button>
+        <button class="btn ${search ? 'btn--ghost' : 'btn--primary'}" type="submit" ${busy}>Vorschau holen</button>
       </div>
     </form>
     <p class="add__alt">
@@ -338,7 +327,34 @@ function addBox() {
       <button class="chip chip--action" type="button" data-act="share-help" aria-expanded="${S.shareHelp ? 'true' : 'false'}">Direkt aus Apps teilen</button>
     </p>
     ${S.shareHelp ? shareHelp() : ''}
-    ${draft}
+    ${draft}`;
+
+  if (!search) {
+    return `
+    <section class="add paper"><div class="paper__inner">
+      <h2>Neue Idee</h2>
+      ${linkPart}
+    </div></section>`;
+  }
+
+  const links = browseLinks();
+  return `
+  <section class="finder">
+    <h2>Bei Amazon stöbern</h2>
+    <p class="finder__sub">Suchen, nach Preis filtern und mit einem Tippen auf deinen Wunschzettel setzen.</p>
+    <form class="finder__form" data-form="finder" role="search">
+      <input id="finder-q" type="search" enterkeyhint="search" autocomplete="off" placeholder="Was wünschst du dir?" aria-label="Bei Amazon suchen" value="${esc(S.sheet.q)}">
+      <button class="btn btn--primary" type="submit">Suchen</button>
+    </form>
+    <div class="chips finder__chips">
+      ${SUGGESTIONS.slice(0, 6).map((q) => `<button type="button" class="chip" data-act="finder-suggest" data-q="${esc(q)}">${esc(q)}</button>`).join('')}
+      ${S.sheet.searched ? '<button type="button" class="chip chip--dark" data-act="sheet-open">Letzte Suche öffnen</button>' : ''}
+    </div>
+  </section>
+  <section class="add paper"><div class="paper__inner">
+    <h2>Aus einem anderen Shop oder eigene Idee</h2>
+    ${linkPart}
+    <p class="hint add__shops">Ideen holen: <a href="${esc(links.etsy)}" target="_blank" rel="noopener noreferrer" data-shop="etsy">Etsy öffnen</a> oder <a href="${esc(links.amazon)}" target="_blank" rel="noopener noreferrer" data-shop="amazon">amazon.de öffnen</a>, dann den Link hier einfügen.</p>
   </div></section>`;
 }
 
@@ -526,7 +542,7 @@ function viewPerson(id) {
     </div>
     <aside class="profile__side">
       ${aboutBox(p, own)}
-      ${editableRound() ? browseBox(p, own) : ''}
+      ${editableRound() && !(own && S.data.features && S.data.features.amazonSearch) ? browseBox(p, own) : ''}
     </aside>
   </main>
   ${footer()}`;
@@ -742,6 +758,11 @@ const actions = {
     document.querySelectorAll('[data-act="sheet-cat"]').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.id === S.sheet.cat)));
     if (S.sheet.q.trim() || S.sheet.cat) runSearch();
   },
+  'finder-suggest'(el) {
+    S.sheet.q = el.dataset.q;
+    openSheet(el);
+    runSearch();
+  },
   'sheet-suggest'(el) {
     S.sheet.q = el.dataset.q;
     const inp = $('#sheet-q');
@@ -879,6 +900,13 @@ async function adminCall(path, opts, okMsg) {
 
 const forms = {
   preview(f) { loadPreview(f.querySelector('#add-url').value); },
+  finder(f) {
+    const q = f.querySelector('#finder-q').value.trim();
+    if (!q) return f.querySelector('#finder-q').focus();
+    S.sheet.q = q;
+    openSheet(f.querySelector('button'));
+    runSearch();
+  },
   'sheet-search'(f) {
     const inp = f.querySelector('#sheet-q');
     S.sheet.q = inp.value;
@@ -977,7 +1005,8 @@ const fmtRating = (r) => (Math.round(Number(r) * 10) / 10).toLocaleString('de-DE
 function openSheet(opener) {
   sheetOpener = opener || document.activeElement;
   const r = round();
-  if (!S.sheet.searched) {
+  if (!S.sheet.prefilled) {
+    S.sheet.prefilled = true;
     S.sheet.min = r && r.budget_min != null ? String(r.budget_min) : '';
     S.sheet.max = r && r.budget_max != null ? String(r.budget_max) : '';
   }
@@ -989,7 +1018,7 @@ function openSheet(opener) {
     const root = $('#sheet-root');
     root.classList.add('is-open');
     // Am Handy nicht sofort die Tastatur aufklappen, wenn schon Ergebnisse da sind
-    if (!S.sheet.searched) $('#sheet-q').focus({ preventScroll: true });
+    if (!S.sheet.q) $('#sheet-q').focus({ preventScroll: true });
     else $('.sheet__close').focus({ preventScroll: true });
   });
 }

@@ -764,3 +764,25 @@ body.has-sheet { overflow: hidden; }
 
 .sheet__more { display: flex; justify-content: center; margin: 18px 0 6px; }
 .sheet__note { text-align: center; margin-top: 10px; }
+
+/* ===== Amazon-Suche oben auf dem eigenen Wunschzettel ===== */
+.finder {
+  background: var(--fir);
+  color: var(--snow);
+  border-radius: 16px;
+  padding: clamp(18px, 4vw, 26px);
+  display: grid;
+  gap: 12px;
+}
+.finder h2 { font-size: clamp(1.35rem, 3.6vw, 1.6rem); }
+.finder__sub { opacity: 0.85; font-size: 0.98rem; }
+.finder__form { display: flex; gap: 8px; }
+.finder__form input { flex: 1; min-width: 0; font-size: 16px; border-color: transparent !important; }
+.finder__form .btn { flex: none; }
+.finder__chips { gap: 7px; }
+.finder .chip { background: rgba(241, 245, 242, 0.1); border-color: rgba(241, 245, 242, 0.3); color: var(--snow); }
+.finder .chip:hover { border-color: var(--snow); }
+.finder .chip--dark { background: var(--snow); color: var(--fir); border-color: var(--snow); }
+.finder :focus-visible { outline-color: var(--mustard); }
+.add h2 { font-size: 1.12rem; }
+.add__shops { margin-top: 14px; }
