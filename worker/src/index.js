@@ -1,4 +1,5 @@
 import { fetchPreview } from './preview.js';
+import { amazonSearch, searchConfigured, SearchUnavailable } from './amazon.js';
 
 // ---------- Hilfsfunktionen ----------
 
@@ -108,6 +109,7 @@ async function state(env, roundId) {
     people: people.results,
     members: members.results.map((m) => m.person_id),
     items: items.results,
+    features: { amazonSearch: searchConfigured(env) },
   };
 }
 
@@ -129,8 +131,19 @@ async function route(request, env, url) {
     const target = url.searchParams.get('url');
     if (!target) fail(400, 'Es fehlt der Link.');
     try {
-      return json(await fetchPreview(target));
+      return json(await fetchPreview(target, env));
     } catch (e) {
+      fail(400, e.message);
+    }
+  }
+
+  // Amazon-Suche im Tool
+  if (m === 'GET' && a === 'search') {
+    const p = Object.fromEntries(url.searchParams);
+    try {
+      return json(await amazonSearch(env, p));
+    } catch (e) {
+      if (e instanceof SearchUnavailable) return json({ error: e.message, unavailable: true }, 503);
       fail(400, e.message);
     }
   }
@@ -155,7 +168,7 @@ async function route(request, env, url) {
     };
     if (fields.url && !fields.title && !fields.image) {
       try {
-        const p = await fetchPreview(fields.url);
+        const p = await fetchPreview(fields.url, env);
         fields = { url: p.url, title: p.title, image: p.image, price: p.price, site: p.site };
       } catch {
         /* Dann eben ohne Vorschau */
@@ -186,7 +199,7 @@ async function route(request, env, url) {
 
     if (m === 'POST' && c === 'refresh') {
       if (!item.url) fail(400, 'Diese Idee hat keinen Link.');
-      const p = await fetchPreview(item.url);
+      const p = await fetchPreview(item.url, env);
       const row = await env.DB.prepare(
         `UPDATE items SET title = ?, image = ?, price = ?, site = ?, updated_at = datetime('now') WHERE id = ? RETURNING *`,
       )

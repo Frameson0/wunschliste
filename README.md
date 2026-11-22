@@ -6,7 +6,9 @@ Unsere Wunschzettel fürs Familien-Wichteln. Jede*r wählt die eigene Christbaum
 - **Ideen ohne Link:** zum Beispiel „Kinogutschein“ oder „Etwas Selbstgemachtes“.
 - **Herzenswunsch:** Markiert, was man sich am meisten wünscht.
 - **Gut zu wissen:** Größen, Lieblingsfarben und was man gar nicht mag.
-- **Stöbern:** Öffnet die Suche bei Amazon oder Etsy, schon nach Budget und Kategorie gefiltert.
+- **Amazon-Suche im Tool:** Suchen, nach Kategorie und Preis filtern und mit einem Tippen auf die Liste setzen (über SerpApi, Fallback amazonscraperapi).
+- **Teilen statt Kopieren:** Unter Android lässt sich Wichteln als App installieren und erscheint im Teilen-Menü. Fürs iPhone gibt es eine Kurzbefehl-Anleitung im Tool unter „Direkt aus Apps teilen“.
+- **Stöbern:** Öffnet außerdem die Suche bei Amazon oder Etsy im Shop, schon nach Budget und Kategorie gefiltert.
 - **Jedes Jahr neu:** Frühere Jahre bleiben zum Nachschauen erhalten.
 - **Verwaltung (nur mit Passwort):** Teilnehmende, Budget, Datum der Bescherung, neues Jahr starten.
 
@@ -62,6 +64,15 @@ Ab jetzt wird bei jedem Push auf `main` automatisch neu veröffentlicht.
 1. Seite öffnen, ganz unten auf **Verwaltung** klicken und mit dem Admin-Passwort anmelden.
 2. Das **Budget** eintragen und die Teilnehmenden prüfen. Eric, Dana, Fine, Mika, Alwin und Silke sind schon angelegt. Bescherung ist auf den 24.12. gesetzt.
 3. Den Link in die Familiengruppe schicken. Mehr braucht niemand: Kugel antippen, fertig.
+
+### 6. Amazon-Suche im Tool einschalten (optional)
+
+1. Kostenloses Konto bei [serpapi.com](https://serpapi.com/users/sign_up) anlegen und den **API Key** aus dem Dashboard kopieren (Gratis: 250 Suchen pro Monat).
+2. Als Reserve ein kostenloses Konto bei [amazonscraperapi.com](https://amazonscraperapi.com) anlegen und den API-Key kopieren (Gratis: 1.000 Anfragen pro Monat). Er wird auch genutzt, um Bilder für geteilte Amazon-Links zu holen, wenn Amazon die normale Vorschau blockt.
+3. Bei GitHub zwei weitere Secrets anlegen: `SERPAPI_KEY` und `AMAZONSCRAPER_KEY`.
+4. Den Workflow **Veröffentlichen** erneut starten.
+
+Beide Dienste haben keine Kreditkarte hinterlegt und berechnen nichts: Ist das Monatskontingent aufgebraucht, sagt das Such-Fenster Bescheid und bietet den Weg über amazon.de an. Jede Suche wird 24 Stunden zwischengespeichert, gleiche Suchen kosten also kein zweites Mal.
 
 ---
 

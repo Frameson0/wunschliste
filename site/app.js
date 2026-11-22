@@ -20,6 +20,9 @@ const S = {
   browse: { q: '', cat: '', min: '', max: '' },
   error: null,
   firstPaint: true,
+  shareHelp: false,
+  installPrompt: null,
+  sheet: { open: false, q: '', cat: '', min: '', max: '', sort: 'relevance', items: [], page: 1, hasMore: false, loading: false, error: '', searched: false, adding: {} },
 };
 
 const CATEGORIES = [
@@ -308,20 +311,74 @@ function addBox() {
       </div>
     </form>`;
   }
+  const busy = d && d.loading ? 'disabled' : '';
+  const search = S.data.features && S.data.features.amazonSearch;
   return `
   <section class="add paper"><div class="paper__inner">
     <h2>Neue Idee</h2>
+    ${
+      search
+        ? `<button class="amazon-cta" type="button" data-act="sheet-open">
+            <span class="amazon-cta__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></svg></span>
+            <span><strong>Bei Amazon stöbern</strong><span class="amazon-cta__sub">Suchen, filtern und mit einem Tippen auf die Liste setzen</span></span>
+          </button>
+          <p class="add__divider"><span>oder Link aus einem anderen Shop</span></p>`
+        : ''
+    }
     <form class="add__form" data-form="preview">
-      <label for="add-url">Link aus dem Shop einfügen</label>
+      <label for="add-url">${search ? 'Link einfügen' : 'Link aus dem Shop einfügen'}</label>
       <div class="add__row">
-        <input id="add-url" type="url" inputmode="url" autocomplete="off" placeholder="https://www.amazon.de/…" ${d && d.loading ? 'disabled' : ''}>
-        <button class="btn btn--primary" type="submit" ${d && d.loading ? 'disabled' : ''}>Vorschau holen</button>
+        <input id="add-url" type="url" inputmode="url" autocomplete="off" placeholder="https://…" ${busy}>
+        <button class="btn btn--primary" type="submit" ${busy}>Vorschau holen</button>
       </div>
     </form>
-    <p class="add__alt"><button class="linklike" data-act="no-link">Idee ohne Link aufschreiben</button>
-      <span class="add__or">oder</span> <a class="linklike" href="#browse" data-act="to-browse">erst stöbern</a></p>
+    <p class="add__alt">
+      ${canReadClipboard() ? `<button class="chip chip--action" type="button" data-act="paste" ${busy}>Kopierten Link einfügen</button>` : ''}
+      <button class="chip chip--action" type="button" data-act="no-link">Idee ohne Link</button>
+      <button class="chip chip--action" type="button" data-act="share-help" aria-expanded="${S.shareHelp ? 'true' : 'false'}">Direkt aus Apps teilen</button>
+    </p>
+    ${S.shareHelp ? shareHelp() : ''}
     ${draft}
   </div></section>`;
+}
+
+function canReadClipboard() {
+  return Boolean(navigator.clipboard && navigator.clipboard.readText);
+}
+
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+function shareHelp() {
+  const base = `${location.origin}${location.pathname}`;
+  const ios = `
+    <ol class="steps">
+      <li>Öffne die App <strong>Kurzbefehle</strong> und tippe auf <strong>+</strong>. Nenne den Kurzbefehl „Auf Wunschzettel“.</li>
+      <li>Tippe unten auf das <strong>ⓘ</strong> und schalte <strong>Im Share-Sheet anzeigen</strong> ein.</li>
+      <li>Füge die Aktion <strong>URL codieren</strong> hinzu (englisch „Encode URL“). Als Eingabe: <em>Kurzbefehleingabe</em>.</li>
+      <li>Füge die Aktion <strong>Text</strong> hinzu. Inhalt: die Adresse unten, direkt dahinter die Variable <em>Codierte URL</em>.
+        <span class="copyline"><code>${esc(base)}?text=</code><button class="btn btn--ghost btn--small" type="button" data-act="copy" data-text="${esc(base)}?text=">Kopieren</button></span></li>
+      <li>Füge die Aktion <strong>URLs öffnen</strong> hinzu. Fertig.</li>
+      <li>Ab jetzt in der Amazon-App (oder Safari): <strong>Teilen → Auf Wunschzettel</strong>.</li>
+    </ol>`;
+  const android = `
+    <ol class="steps">
+      <li>${
+        S.installPrompt
+          ? 'Installiere Wichteln als App: <button class="btn btn--primary btn--small" type="button" data-act="install">Als App installieren</button>'
+          : isStandalone()
+            ? 'Wichteln ist schon als App installiert.'
+            : 'Installiere Wichteln als App: In Chrome oben rechts auf <strong>⋮</strong> und dann <strong>App installieren</strong> bzw. <strong>Zum Startbildschirm hinzufügen</strong>.'
+      }</li>
+      <li>In der Amazon-App (oder jeder anderen App) beim Artikel auf <strong>Teilen</strong> tippen und <strong>Wichteln</strong> wählen.</li>
+      <li>Wichteln öffnet sich mit der Vorschau. Ein Tippen auf „Auf den Wunschzettel“, fertig.</li>
+    </ol>`;
+  const first = isIOS() ? ['iPhone', ios, 'Android', android] : ['Android', android, 'iPhone', ios];
+  return `
+    <div class="share-help">
+      <h3>${first[0]}</h3>${first[1]}
+      <details><summary>Anleitung für ${first[2]}</summary>${first[3]}</details>
+    </div>`;
 }
 
 function itemRow(it, own) {
@@ -385,6 +442,15 @@ function browseLinks() {
 
 function browseBox(p, own) {
   const links = browseLinks();
+  if (own && S.data.features && S.data.features.amazonSearch) {
+    return `
+    <section class="browse paper" id="browse"><div class="paper__inner">
+      <h2>Stöbern</h2>
+      <p class="muted">Bei Amazon suchst du direkt hier im Tool, schon nach eurem Budget gefiltert.</p>
+      <button class="btn btn--primary" type="button" data-act="sheet-open">Bei Amazon stöbern</button>
+      <p class="hint">Lieber im Shop selbst? <a href="${esc(links.amazon)}" target="_blank" rel="noopener noreferrer" data-shop="amazon">amazon.de öffnen</a> oder <a href="${esc(links.etsy)}" target="_blank" rel="noopener noreferrer" data-shop="etsy">Etsy öffnen</a> und den Link oben einfügen.</p>
+    </div></section>`;
+  }
   return `
   <section class="browse paper" id="browse"><div class="paper__inner">
     <h2>${own ? 'Stöbern' : `Für ${esc(p.name)} stöbern`}</h2>
@@ -608,7 +674,7 @@ function render() {
 
 function busyTyping() {
   const a = document.activeElement;
-  return Boolean(S.draft || S.editing || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
+  return Boolean(S.draft || S.editing || S.sheet.open || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
 }
 
 async function refresh({ quiet = false } = {}) {
@@ -635,16 +701,16 @@ function readFields(root, prefix) {
   };
 }
 
-async function loadPreview(url) {
+async function loadPreview(url, titleHint = '') {
   url = url.trim();
   if (!url) return;
   S.draft = { loading: true, url };
   render();
   try {
     const p = await api(`/api/preview?url=${encodeURIComponent(url)}`);
-    S.draft = { ...p, comment: '', favorite: false };
+    S.draft = { ...p, title: p.title || titleHint, comment: '', favorite: false };
   } catch (e) {
-    S.draft = { url, title: '', image: '', price: '', site: '', comment: '', favorite: false, complete: false };
+    S.draft = { url, title: titleHint, image: '', price: '', site: '', comment: '', favorite: false, complete: false };
     toast(e.message, 'is-error');
   }
   render();
@@ -666,7 +732,50 @@ function updateBrowseLinks() {
 const actions = {
   async pick(el) {
     setMe(parseInt(el.dataset.id, 10));
-    location.hash = `#/p/${S.me}`;
+    if (sessionStorage.getItem(SHARE_KEY)) processShare();
+    else location.hash = `#/p/${S.me}`;
+  },
+  'sheet-open'(el) { openSheet(el); },
+  'sheet-close'() { closeSheet(); },
+  'sheet-cat'(el) {
+    S.sheet.cat = S.sheet.cat === el.dataset.id ? '' : el.dataset.id;
+    document.querySelectorAll('[data-act="sheet-cat"]').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.id === S.sheet.cat)));
+    if (S.sheet.q.trim() || S.sheet.cat) runSearch();
+  },
+  'sheet-suggest'(el) {
+    S.sheet.q = el.dataset.q;
+    const inp = $('#sheet-q');
+    if (inp) inp.value = S.sheet.q;
+    runSearch();
+  },
+  'sheet-more'() { runSearch({ more: true }); },
+  'sheet-add'(el) { addFromSheet(el.dataset.asin); },
+  'sheet-retry'() { runSearch(); },
+  async paste() {
+    try {
+      const text = await navigator.clipboard.readText();
+      const m = String(text || '').match(/https?:\/\/\S+/);
+      if (!m) return toast('In der Zwischenablage ist kein Link. Kopier zuerst den Link im Shop.', 'is-error');
+      const inp = $('#add-url');
+      if (inp) inp.value = m[0];
+      loadPreview(m[0], titleFromSharedText(text, m[0]));
+    } catch {
+      toast('Kein Zugriff auf die Zwischenablage. Füg den Link bitte direkt ins Feld ein.', 'is-error');
+    }
+  },
+  'share-help'() { S.shareHelp = !S.shareHelp; render(); },
+  async install() {
+    const pr = S.installPrompt;
+    if (!pr) return;
+    pr.prompt();
+    const choice = await pr.userChoice.catch(() => null);
+    S.installPrompt = null;
+    if (choice && choice.outcome === 'accepted') toast('Wichteln wird installiert');
+    render();
+  },
+  async copy(el) {
+    try { await navigator.clipboard.writeText(el.dataset.text); toast('Kopiert'); }
+    catch { toast('Kopieren ging nicht. Bitte von Hand markieren.', 'is-error'); }
   },
   switch() {
     setMe(null);
@@ -770,6 +879,12 @@ async function adminCall(path, opts, okMsg) {
 
 const forms = {
   preview(f) { loadPreview(f.querySelector('#add-url').value); },
+  'sheet-search'(f) {
+    const inp = f.querySelector('#sheet-q');
+    S.sheet.q = inp.value;
+    inp.blur(); // Tastatur am Handy schließen, damit man die Ergebnisse sieht
+    runSearch();
+  },
   async 'save-draft'(f) {
     const v = readFields(f, 'draft');
     if (!v.title && !v.url && !v.comment) return toast('Schreib kurz auf, was du dir wünschst.', 'is-error');
@@ -851,6 +966,251 @@ const forms = {
   },
 };
 
+// ---------- Such-Fenster (Amazon) ----------
+
+const SUGGESTIONS = ['Tee', 'Puzzle', 'Kochbuch', 'Wollsocken', 'Brettspiel', 'Kuscheldecke', 'Thermobecher', 'Duftkerze', 'Bluetooth-Box', 'Gin-Set'];
+const SORT_LABELS = { relevance: 'Passend', price_asc: 'Günstigste zuerst', price_desc: 'Teuerste zuerst', rating: 'Beste Bewertung' };
+
+let sheetOpener = null;
+const fmtRating = (r) => (Math.round(Number(r) * 10) / 10).toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+function openSheet(opener) {
+  sheetOpener = opener || document.activeElement;
+  const r = round();
+  if (!S.sheet.searched) {
+    S.sheet.min = r && r.budget_min != null ? String(r.budget_min) : '';
+    S.sheet.max = r && r.budget_max != null ? String(r.budget_max) : '';
+  }
+  S.sheet.open = true;
+  history.pushState({ sheet: true }, '');
+  document.body.classList.add('has-sheet');
+  renderSheet();
+  requestAnimationFrame(() => {
+    const root = $('#sheet-root');
+    root.classList.add('is-open');
+    // Am Handy nicht sofort die Tastatur aufklappen, wenn schon Ergebnisse da sind
+    if (!S.sheet.searched) $('#sheet-q').focus({ preventScroll: true });
+    else $('.sheet__close').focus({ preventScroll: true });
+  });
+}
+
+function closeSheet({ fromHistory = false } = {}) {
+  if (!S.sheet.open) return;
+  S.sheet.open = false;
+  if (!fromHistory && history.state && history.state.sheet) history.back();
+  document.body.classList.remove('has-sheet');
+  const root = $('#sheet-root');
+  root.classList.remove('is-open');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  setTimeout(() => { if (!S.sheet.open) root.innerHTML = ''; }, reduce ? 0 : 260);
+  if (sheetOpener && document.contains(sheetOpener)) sheetOpener.focus({ preventScroll: true });
+}
+
+function ownAsins() {
+  const set = new Set();
+  if (!S.data) return set;
+  S.data.items.filter((i) => i.person_id === S.me).forEach((i) => {
+    const m = String(i.url).match(/\/dp\/([A-Z0-9]{10})/i);
+    if (m) set.add(m[1].toUpperCase());
+  });
+  return set;
+}
+
+function renderSheet() {
+  let root = $('#sheet-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'sheet-root';
+    document.body.appendChild(root);
+  }
+  const sh = S.sheet;
+  root.innerHTML = `
+    <div class="sheet-backdrop" data-act="sheet-close"></div>
+    <section class="bsheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <header class="sheet__head">
+        <span class="sheet__grip" aria-hidden="true"></span>
+        <h2 id="sheet-title">Bei Amazon stöbern</h2>
+        <button class="icon-btn sheet__close" type="button" data-act="sheet-close" aria-label="Schließen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </header>
+      <form class="sheet__search" data-form="sheet-search" role="search">
+        <div class="searchbar">
+          <input id="sheet-q" type="search" enterkeyhint="search" autocomplete="off" placeholder="Was suchst du?" value="${esc(sh.q)}" aria-label="Suchbegriff">
+          <button class="btn btn--primary" type="submit">Suchen</button>
+        </div>
+        <div class="chips chips--scroll" role="group" aria-label="Kategorie">
+          ${CATEGORIES.map((c) => `<button type="button" class="chip" data-act="sheet-cat" data-id="${c.id}" aria-pressed="${sh.cat === c.id}">${esc(c.label)}</button>`).join('')}
+        </div>
+        <div class="sheet__filters">
+          <label class="mini"><span>Preis von</span><input data-sheet="min" type="number" min="0" inputmode="numeric" value="${esc(sh.min)}" placeholder="0"></label>
+          <label class="mini"><span>bis</span><input data-sheet="max" type="number" min="0" inputmode="numeric" value="${esc(sh.max)}" placeholder="∞"></label>
+          <label class="mini mini--grow"><span>Sortierung</span>
+            <select data-sheet="sort">${Object.entries(SORT_LABELS).map(([k, v]) => `<option value="${k}" ${sh.sort === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+        </div>
+      </form>
+      <div class="sheet__body" id="sheet-body">${sheetBody()}</div>
+    </section>`;
+}
+
+function sheetBody() {
+  const sh = S.sheet;
+  if (sh.loading && !sh.items.length) {
+    return `<div class="hits" aria-busy="true">${Array.from({ length: 6 }, () => '<div class="hit is-skeleton"><span class="hit__img"></span><span class="sk"></span><span class="sk sk--short"></span></div>').join('')}</div>`;
+  }
+  if (sh.error) {
+    return `<div class="sheet__msg"><p>${esc(sh.error)}</p>
+      <div class="actions"><button class="btn btn--ghost" type="button" data-act="sheet-retry">Noch mal versuchen</button>
+      <a class="btn btn--ghost" href="${esc(browseLinksFor(sh).amazon)}" target="_blank" rel="noopener noreferrer">Auf amazon.de suchen</a></div></div>`;
+  }
+  if (!sh.searched) {
+    return `<div class="sheet__msg"><p>Gib oben ein, was du dir wünschst, oder fang mit einer Idee an:</p>
+      <div class="chips">${SUGGESTIONS.map((q) => `<button type="button" class="chip chip--action" data-act="sheet-suggest" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div></div>`;
+  }
+  if (!sh.items.length) {
+    return `<div class="sheet__msg"><p>Dazu gibt es in diesem Preisbereich nichts. Versuch einen anderen Begriff oder lockere den Preisfilter.</p></div>`;
+  }
+  const mine = ownAsins();
+  return `
+    <div class="hits">
+      ${sh.items
+        .map((it) => {
+          const added = mine.has(it.asin);
+          const adding = sh.adding[it.asin];
+          return `
+          <article class="hit">
+            <a class="hit__img" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer" aria-label="${esc(it.title)} bei Amazon ansehen">
+              ${httpUrl(it.image) ? `<img src="${esc(it.image)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}
+            </a>
+            <h3 class="hit__title">${esc(it.title)}</h3>
+            <p class="hit__meta">${it.price ? `<span class="price">${esc(it.price)}</span>` : '<span class="muted">Preis im Shop</span>'}
+              ${it.rating ? `<span class="hit__rating" aria-label="${fmtRating(it.rating)} von 5 Sternen">★ ${fmtRating(it.rating)}</span>` : ''}</p>
+            ${
+              added
+                ? '<button class="btn btn--small hit__add is-added" type="button" disabled>Auf deiner Liste ✓</button>'
+                : `<button class="btn btn--primary btn--small hit__add" type="button" data-act="sheet-add" data-asin="${esc(it.asin)}" ${adding ? 'disabled' : ''}>${adding ? 'Kommt drauf …' : 'Auf meine Liste'}</button>`
+            }
+          </article>`;
+        })
+        .join('')}
+    </div>
+    ${sh.hasMore ? `<div class="sheet__more"><button class="btn btn--ghost" type="button" data-act="sheet-more" ${sh.loading ? 'disabled' : ''}>${sh.loading ? 'Lädt …' : 'Mehr anzeigen'}</button></div>` : ''}
+    <p class="hint sheet__note">Preise laut Amazon zum Zeitpunkt der Suche.</p>`;
+}
+
+function renderSheetBody() {
+  const body = $('#sheet-body');
+  if (body) body.innerHTML = sheetBody();
+}
+
+function browseLinksFor(sh) {
+  const saved = S.browse;
+  S.browse = { q: sh.q, cat: sh.cat, min: sh.min, max: sh.max };
+  const links = browseLinks();
+  S.browse = saved;
+  return links;
+}
+
+let searchSeq = 0;
+async function runSearch({ more = false } = {}) {
+  const sh = S.sheet;
+  const cat = CATEGORIES.find((c) => c.id === sh.cat);
+  const q = [sh.q.trim(), cat ? cat.kw : ''].filter(Boolean).join(' ');
+  if (!q) {
+    const inp = $('#sheet-q');
+    if (inp) inp.focus();
+    return;
+  }
+  const seq = ++searchSeq;
+  const page = more ? sh.page + 1 : 1;
+  sh.loading = true;
+  sh.error = '';
+  sh.searched = true;
+  if (!more) { sh.items = []; const b = $('#sheet-body'); if (b) b.scrollTop = 0; }
+  renderSheetBody();
+  try {
+    const params = new URLSearchParams({ q, page: String(page), sort: sh.sort });
+    if (sh.min) params.set('min', sh.min);
+    if (sh.max) params.set('max', sh.max);
+    const res = await api(`/api/search?${params}`);
+    if (seq !== searchSeq) return;
+    const known = new Set(sh.items.map((i) => i.asin));
+    sh.items = more ? sh.items.concat(res.items.filter((i) => !known.has(i.asin))) : res.items;
+    sh.page = page;
+    sh.hasMore = res.hasMore && page < 5;
+  } catch (e) {
+    if (seq !== searchSeq) return;
+    if (!more) sh.error = e.message;
+    else toast(e.message, 'is-error');
+  }
+  sh.loading = false;
+  renderSheetBody();
+}
+
+async function addFromSheet(asin) {
+  const it = S.sheet.items.find((i) => i.asin === asin);
+  if (!it) return;
+  S.sheet.adding[asin] = true;
+  renderSheetBody();
+  try {
+    await api('/api/items', {
+      method: 'POST',
+      body: { person_id: S.me, round_id: round().id, url: it.url, title: it.title, image: it.image, price: it.price, site: 'Amazon' },
+    });
+    await load();
+    toast('Steht jetzt auf deinem Wunschzettel');
+    render();
+  } catch (e) {
+    toast(e.message, 'is-error');
+  }
+  delete S.sheet.adding[asin];
+  renderSheetBody();
+}
+
+// ---------- Teilen aus anderen Apps ----------
+
+const SHARE_KEY = 'wichteln.share';
+
+function titleFromSharedText(text, url) {
+  return String(text || '')
+    .replace(url, '')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/^(schau dir|sieh dir|check out|ich habe).*?(an|gefunden|out)\s*[:\-–]?\s*/i, '')
+    .replace(/["“”„]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[:\-–]$/, '')
+    .slice(0, 200);
+}
+
+// Liest ?url=/?text=/?title= (Android-Share-Target oder iPhone-Kurzbefehl) und merkt sie sich
+function captureShare() {
+  const sp = new URLSearchParams(location.search);
+  if (!sp.has('url') && !sp.has('text')) return;
+  const text = [sp.get('title'), sp.get('text'), sp.get('url')].filter(Boolean).join(' ');
+  const m = text.match(/https?:\/\/\S+/);
+  if (m) {
+    const title = sp.get('title') && !/^https?:/.test(sp.get('title')) ? sp.get('title') : titleFromSharedText(sp.get('text') || '', m[0]);
+    try { sessionStorage.setItem(SHARE_KEY, JSON.stringify({ url: m[0], title })); } catch { /* egal */ }
+  }
+  history.replaceState(null, '', location.pathname + location.hash);
+}
+
+function processShare() {
+  let share = null;
+  try { share = JSON.parse(sessionStorage.getItem(SHARE_KEY) || 'null'); } catch { /* egal */ }
+  if (!share || !S.data || !S.me) return; // ohne Namen erst die Kugel wählen lassen
+  sessionStorage.removeItem(SHARE_KEY);
+  if (!editableRound()) {
+    S.viewRound = null;
+  }
+  if (location.hash !== `#/p/${S.me}`) {
+    history.replaceState(null, '', `#/p/${S.me}`);
+    render();
+  }
+  loadPreview(share.url, share.title);
+}
+
 // ---------- Events ----------
 
 document.addEventListener('click', (ev) => {
@@ -873,10 +1233,15 @@ document.addEventListener('change', (ev) => {
   if (ev.target.matches('[data-act="round-select"]')) {
     actions.round({ dataset: { id: ev.target.value } });
   }
+  if (ev.target.dataset.sheet) {
+    S.sheet[ev.target.dataset.sheet] = ev.target.value;
+    if (S.sheet.searched) runSearch();
+  }
 });
 
 document.addEventListener('input', (ev) => {
   const t = ev.target;
+  if (t.id === 'sheet-q') S.sheet.q = t.value;
   if (t.dataset.browse) {
     S.browse[t.dataset.browse] = t.value;
     updateBrowseLinks();
@@ -889,9 +1254,15 @@ document.addEventListener('paste', (ev) => {
 
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape') {
+    if (S.sheet.open) { closeSheet(); return; }
     if (S.editing) { S.editing = null; render(); }
     else if (S.draft && !S.draft.loading) { S.draft = null; render(); }
   }
+});
+
+window.addEventListener('popstate', () => {
+  // Zurück-Taste am Handy schließt das Such-Fenster
+  if (S.sheet.open && !(history.state && history.state.sheet)) closeSheet({ fromHistory: true });
 });
 
 window.addEventListener('hashchange', () => {
@@ -908,6 +1279,15 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && !b
 // ---------- Start ----------
 
 (async function start() {
+  captureShare();
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    S.installPrompt = e;
+    if (S.shareHelp) render();
+  });
   try {
     await load();
     resetBrowse();
@@ -918,4 +1298,5 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && !b
     S.error = e.message;
   }
   render();
+  processShare();
 })();

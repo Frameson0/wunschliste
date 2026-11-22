@@ -1,6 +1,7 @@
 // Holt Titel, Bild und Preis zu einem Produktlink.
 // Reihenfolge: JSON-LD (Produktdaten) -> Shop-spezifisch (Amazon) -> OpenGraph/Meta -> <title>
-// Wenn der Shop uns blockt, wird microlink.io als Ausweichlösung gefragt.
+// Wenn der Shop uns blockt: bei Amazon amazonscraperapi (falls eingerichtet), sonst microlink.io.
+import { amazonProduct } from './amazon.js';
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -144,7 +145,7 @@ async function microlink(url) {
   }
 }
 
-export async function fetchPreview(rawUrl) {
+export async function fetchPreview(rawUrl, env = null) {
   const url = normalizeUrl(rawUrl);
   if (!url) throw new Error('Das sieht nicht nach einem Link aus. Bitte die komplette Adresse mit https:// einfügen.');
 
@@ -198,6 +199,16 @@ export async function fetchPreview(rawUrl) {
       amz.price ||
       formatPrice(meta['product:price:amount'] || meta['og:price:amount'] || meta['price'] || '', meta['product:price:currency'] || meta['og:price:currency'] || meta['pricecurrency']);
     if (meta['og:site_name'] && !/amazon|etsy/i.test(result.site)) result.site = clean(meta['og:site_name']);
+  }
+
+  const asin = (result.url.match(/amazon\.[a-z.]+\/dp\/([A-Z0-9]{10})/i) || [])[1];
+  if ((!result.title || !result.image) && asin && env) {
+    const ap = await amazonProduct(env, asin.toUpperCase());
+    if (ap) {
+      result.title = result.title || ap.title;
+      result.image = result.image || ap.image;
+      result.price = result.price || ap.price;
+    }
   }
 
   if (!result.title || !result.image) {

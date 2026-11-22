@@ -24,6 +24,8 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+      SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+      AMAZONSCRAPER_KEY: ${{ secrets.AMAZONSCRAPER_KEY }}
     steps:
       - name: Prüfen, ob alle Secrets eingetragen sind
         run: |
@@ -102,6 +104,12 @@ jobs:
       - name: Admin-Passwort hinterlegen
         working-directory: worker
         run: printf '%s' "$ADMIN_PASSWORD" | npx wrangler secret put ADMIN_PASSWORD
+
+      - name: Schlüssel für die Amazon-Suche hinterlegen (falls eingetragen)
+        working-directory: worker
+        run: |
+          if [ -n "$SERPAPI_KEY" ]; then printf '%s' "$SERPAPI_KEY" | npx wrangler secret put SERPAPI_KEY; else echo "SERPAPI_KEY ist nicht gesetzt."; fi
+          if [ -n "$AMAZONSCRAPER_KEY" ]; then printf '%s' "$AMAZONSCRAPER_KEY" | npx wrangler secret put AMAZONSCRAPER_KEY; else echo "AMAZONSCRAPER_KEY ist nicht gesetzt."; fi
 
   site:
     name: Webseite (GitHub Pages)
