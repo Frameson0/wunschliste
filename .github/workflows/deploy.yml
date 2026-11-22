@@ -66,8 +66,20 @@ jobs:
         id: deploy
         working-directory: worker
         run: |
-          set -o pipefail
-          npx wrangler deploy 2>&1 | tee deploy.log
+          set +e
+          npx wrangler deploy > deploy.log 2>&1
+          code=$?
+          set -e
+          cat deploy.log
+          if grep -qiE "workers\.dev subdomain|register a workers\.dev" deploy.log; then
+            echo "::error::Dein Cloudflare-Konto hat noch keine workers.dev-Subdomain. Öffne im Cloudflare-Dashboard 'Workers & Pages', richte die Subdomain ein (ein Name genügt) und starte den Workflow neu."
+            exit 1
+          fi
+          if [ "$code" -ne 0 ]; then
+            msg=$(grep -E "ERROR|✘" deploy.log | head -n 3 | tr '\n' ' ')
+            echo "::error::Veröffentlichen des Workers fehlgeschlagen: ${msg:-siehe Log}"
+            exit "$code"
+          fi
           url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -n 1 || true)
           if [ -z "$url" ]; then
             echo "Keine Adresse in der Ausgabe gefunden – frage die workers.dev-Subdomain bei Cloudflare ab."
