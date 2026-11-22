@@ -71,7 +71,7 @@ jobs:
           code=$?
           set -e
           cat deploy.log
-          if grep -qiE "workers\.dev subdomain|register a workers\.dev" deploy.log; then
+          if [ "$code" -ne 0 ] && grep -qiE "workers\.dev subdomain|register a workers\.dev" deploy.log; then
             echo "::error::Dein Cloudflare-Konto hat noch keine workers.dev-Subdomain. Öffne im Cloudflare-Dashboard 'Workers & Pages', richte die Subdomain ein (ein Name genügt) und starte den Workflow neu."
             exit 1
           fi
@@ -118,7 +118,8 @@ jobs:
           WORKER_URL: ${{ needs.api.outputs.url }}
           API_URL: ${{ vars.API_URL }}
         run: |
-          url="${API_URL:-$WORKER_URL}"
+          # Fallback: bekannte Adresse des Workers
+          url="${API_URL:-${WORKER_URL:-https://wichteln-api.jeric-kebel.workers.dev}}"
           if [ -z "$url" ]; then
             echo "::error::Die Adresse des Workers wurde nicht gefunden. Trag sie als Repository-Variable API_URL ein (README, Abschnitt Probleme)."
             exit 1
