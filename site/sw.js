@@ -1,7 +1,7 @@
 // Minimaler Service Worker: macht Wichteln als App installierbar (Teilen-Menü unter Android)
 // und hält die Seite selbst für schlechten Empfang bereit. API-Aufrufe gehen immer ins Netz.
-const CACHE = 'wichteln-v1';
-const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'favicon.svg', 'icon-192.png'];
+const CACHE = 'wichteln-v2';
+const SHELL = ['./', 'favicon.svg', 'icon-192.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -19,7 +19,7 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET' || url.origin !== self.location.origin) return;
   // Immer zuerst das Netz (damit Updates sofort ankommen), bei Funkloch der Zwischenspeicher
   e.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'no-cache' }) // beim Server nachfragen, ob es eine neue Version gibt
       .then((res) => {
         if (res.ok) {
           const copy = res.clone();

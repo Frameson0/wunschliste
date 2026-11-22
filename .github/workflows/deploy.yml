@@ -133,6 +133,10 @@ jobs:
             exit 1
           fi
           echo "window.WICHTEL_API = '$url';" > site/config.js
+          # Versionsnummer anhängen, damit Handys nie eine alte Fassung aus dem Zwischenspeicher zeigen
+          v="${GITHUB_SHA::7}"
+          sed -i "s/?v=dev/?v=$v/g" site/index.html
+          sed -i "s/wichteln-v2/wichteln-$v/" site/sw.js
           echo "API: $url"
 
       - uses: actions/configure-pages@v5
