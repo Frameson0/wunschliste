@@ -143,7 +143,7 @@ async function route(request, env, url) {
     try {
       return json(await amazonSearch(env, p));
     } catch (e) {
-      if (e instanceof SearchUnavailable) return json({ error: e.message, unavailable: true }, 503);
+      if (e instanceof SearchUnavailable) return json({ error: e.message, unavailable: true, details: e.details || [] }, 503);
       fail(400, e.message);
     }
   }

@@ -57,7 +57,17 @@ function normalize(list) {
   return out;
 }
 
-async function viaSerpApi(key, { q, page, sort, min, max }) {
+async function viaSerpApi(key, args) {
+  try {
+    return await serpApiCall(key, args, true);
+  } catch (e) {
+    // Falls SerpApi den Preis-Filter (rh) nicht annimmt: ohne Filter, wir filtern danach selbst
+    if (args.min != null || args.max != null) return serpApiCall(key, args, false);
+    throw e;
+  }
+}
+
+async function serpApiCall(key, { q, page, sort, min, max }, withPrice) {
   const u = new URL('https://serpapi.com/search.json');
   u.searchParams.set('engine', 'amazon');
   u.searchParams.set('amazon_domain', DOMAIN);
@@ -65,7 +75,7 @@ async function viaSerpApi(key, { q, page, sort, min, max }) {
   u.searchParams.set('k', q);
   u.searchParams.set('page', String(page));
   u.searchParams.set('s', SORTS[sort].serp);
-  if (min != null || max != null) u.searchParams.set('rh', `p_36:${min != null ? min * 100 : ''}-${max != null ? max * 100 : ''}`);
+  if (withPrice && (min != null || max != null)) u.searchParams.set('rh', `p_36:${min != null ? min * 100 : ''}-${max != null ? max * 100 : ''}`);
   u.searchParams.set('api_key', key);
   const res = await fetch(u, { headers: { accept: 'application/json' } });
   const j = await res.json().catch(() => ({}));
@@ -142,7 +152,9 @@ export async function amazonSearch(env, params) {
   }
   if (!result) {
     console.error('Amazon-Suche fehlgeschlagen:', errors.join(' | '));
-    throw new SearchUnavailable('Die Amazon-Suche ist gerade nicht verfügbar, vermutlich ist das Gratis-Kontingent für diesen Monat aufgebraucht.');
+    const err = new SearchUnavailable('Die Amazon-Suche ist gerade nicht verfügbar, vermutlich ist das Gratis-Kontingent für diesen Monat aufgebraucht.');
+    err.details = errors.map((m) => m.replace(/api_key=[^&\s]+/g, 'api_key=…').slice(0, 300));
+    throw err;
   }
 
   // Preisfilter sicherheitshalber selbst anwenden (nicht jeder Dienst filtert)
