@@ -91,7 +91,7 @@ function assertEditable(round) {
   if (!round.is_current) fail(403, 'Frühere Jahre sind nur noch zum Anschauen da.');
 }
 
-async function state(env, roundId) {
+async function state(env, roundId, viewerId = null) {
   const round = await loadRound(env, roundId);
   const [rounds, people, members, items] = await env.DB.batch([
     env.DB.prepare(
@@ -108,7 +108,10 @@ async function state(env, roundId) {
     rounds: rounds.results,
     people: people.results,
     members: members.results.map((m) => m.person_id),
-    items: items.results,
+    // Kauf-Markierungen auf dem eigenen Wunschzettel nie an die beschenkte Person schicken
+    items: items.results.map((it) =>
+      viewerId && it.person_id === viewerId ? { ...it, purchased_by: null, purchased_at: null } : it,
+    ),
     features: { amazonSearch: searchConfigured(env) },
   };
 }
@@ -123,7 +126,7 @@ async function route(request, env, url) {
 
   // Alles auf einmal laden
   if (m === 'GET' && a === 'state') {
-    return json(await state(env, intOrNull(url.searchParams.get('round'))));
+    return json(await state(env, intOrNull(url.searchParams.get('round')), intOrNull(url.searchParams.get('viewer'))));
   }
 
   // Link-Vorschau
@@ -205,7 +208,7 @@ async function route(request, env, url) {
       )
         .bind(p.title || item.title, p.image || item.image, p.price || item.price, p.site || item.site, id)
         .first();
-      return json(row);
+      return json({ ...row, purchased_by: null, purchased_at: null });
     }
 
     if (m === 'PATCH' && !c) {
@@ -225,8 +228,28 @@ async function route(request, env, url) {
       )
         .bind(next.url, next.title, next.image, next.price, next.site, next.comment, next.favorite, id)
         .first();
-      return json(row);
+      return json({ ...row, purchased_by: null, purchased_at: null });
     }
+  }
+
+  // Als gekauft markieren / Markierung entfernen
+  if (a === 'items' && b && c === 'purchase' && (m === 'POST' || m === 'DELETE')) {
+    const item = await getItem(env, intOrNull(b));
+    assertEditable(item);
+    if (m === 'POST') {
+      const d = await body(request);
+      const buyer = intOrNull(d.person_id);
+      if (!buyer) fail(400, 'Bitte zuerst oben deinen Namen wählen.');
+      if (buyer === item.person_id) fail(400, 'Deine eigenen Wünsche kannst du nicht als gekauft markieren.');
+      if (item.purchased_by && item.purchased_by !== buyer) {
+        const who = await env.DB.prepare('SELECT name FROM people WHERE id = ?').bind(item.purchased_by).first();
+        fail(409, `${who ? who.name : 'Jemand'} hat das schon gekauft.`);
+      }
+      await env.DB.prepare("UPDATE items SET purchased_by = ?, purchased_at = datetime('now') WHERE id = ?").bind(buyer, item.id).run();
+    } else {
+      await env.DB.prepare('UPDATE items SET purchased_by = NULL, purchased_at = NULL WHERE id = ?').bind(item.id).run();
+    }
+    return json({ ok: true });
   }
 
   // "Gut zu wissen" einer Person (darf jede*r für sich selbst pflegen)

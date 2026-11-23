@@ -894,3 +894,17 @@ body.has-sheet { overflow: hidden; }
   color: var(--fir-soft); font: inherit; font-size: 1rem;
   text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
 }
+
+/* ===== Schon gekauft ===== */
+.bought { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 6px; }
+.bought__badge {
+  font-size: 0.88rem; font-weight: 650;
+  background: color-mix(in srgb, var(--fir) 12%, #fff);
+  color: var(--fir);
+  border-radius: 999px; padding: 3px 11px 4px;
+}
+.btn--buy { border-color: var(--fir-soft); }
+.item.is-bought .item__media, .item.is-bought .item__title, .item.is-bought .item__meta { opacity: 0.5; }
+.item.is-bought .item__title a { text-decoration: line-through; text-decoration-thickness: 1.5px; }
+.tile-bought { margin-left: 10px; font-weight: 600; color: var(--fir); }
+.tile-bought::before { content: '✓ '; }

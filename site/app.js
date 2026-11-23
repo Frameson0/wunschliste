@@ -109,7 +109,10 @@ async function api(path, { method = 'GET', body, admin = false } = {}) {
 }
 
 async function load() {
-  S.data = await api(`/api/state${S.viewRound ? `?round=${S.viewRound}` : ''}`);
+  const qs = new URLSearchParams();
+  if (S.viewRound) qs.set('round', S.viewRound);
+  if (S.me) qs.set('viewer', S.me);
+  S.data = await api(`/api/state${qs.toString() ? `?${qs}` : ''}`);
   S.error = null;
   if (S.me && !S.data.people.some((p) => p.id === S.me)) setMe(null);
 }
@@ -284,7 +287,9 @@ function viewHome() {
               <span class="dot" aria-hidden="true"></span>
               <span class="sheet-tile__name">${mine ? 'Dein Wunschzettel' : esc(genitive(p.name)) + ' Wunschzettel'}</span>
             </span>
-            <span class="sheet-tile__count">${its.length ? ideas(its.length) : mine && editableRound() ? 'Noch leer, leg los' : 'Noch keine Ideen'}</span>
+            <span class="sheet-tile__count">${its.length ? ideas(its.length) : mine && editableRound() ? 'Noch leer, leg los' : 'Noch keine Ideen'}${
+              !mine && its.some((i) => i.purchased_by) ? `<span class="tile-bought">${its.filter((i) => i.purchased_by).length} schon gekauft</span>` : ''
+            }</span>
             ${withImg.length ? `<span class="sheet-tile__thumbs">${withImg.map((i) => thumb(i, 'thumb--s')).join('')}</span>` : ''}
             ${
               !withImg.length && its.length
@@ -447,14 +452,27 @@ function itemRow(it, own) {
   }
   const link = httpUrl(it.url);
   const title = esc(it.title || (link ? it.site || 'Link' : 'Idee'));
+  const buyer = !own && it.purchased_by ? person(it.purchased_by) : null;
+  const canBuy = !own && S.me && editableRound();
+  let buyBlock = '';
+  if (!own && it.purchased_by) {
+    const mine = it.purchased_by === S.me;
+    buyBlock = `<div class="bought">
+        <span class="bought__badge">✓ Schon gekauft${mine ? ' von dir' : buyer ? ` von ${esc(buyer.name)}` : ''}</span>
+        ${canBuy && mine ? `<button class="linklike" type="button" data-act="unbuy" data-id="${it.id}">Doch nicht gekauft</button>` : ''}
+      </div>`;
+  } else if (canBuy) {
+    buyBlock = `<div class="bought"><button class="btn btn--ghost btn--small btn--buy" type="button" data-act="buy" data-id="${it.id}">Hab ich gekauft</button></div>`;
+  }
   return `
-  <li class="item ${it.favorite ? 'is-fav' : ''}">
+  <li class="item ${it.favorite ? 'is-fav' : ''} ${!own && it.purchased_by ? 'is-bought' : ''}">
     ${link ? `<a class="item__media" href="${esc(link)}" target="_blank" rel="noopener noreferrer" tabindex="-1" aria-hidden="true">${thumb(it)}</a>` : `<span class="item__media">${thumb(it)}</span>`}
     <div class="item__body">
       ${it.favorite ? '<span class="fav-badge">Herzenswunsch</span>' : ''}
       <h3 class="item__title">${link ? `<a href="${esc(link)}" target="_blank" rel="noopener noreferrer">${title}</a>` : title}</h3>
       ${it.price || it.site ? `<p class="item__meta">${it.price ? `<span class="price">${esc(it.price)}</span>` : ''}${it.site ? `<span class="site">bei ${esc(it.site)}</span>` : ''}</p>` : ''}
       ${it.comment ? `<p class="item__comment">${esc(it.comment)}</p>` : ''}
+      ${buyBlock}
     </div>
     ${
       editable
@@ -783,6 +801,23 @@ const actions = {
   },
   'sheet-open'(el) { openSheet(el); },
   tour() { startTour(); },
+  async buy(el) {
+    const it = S.data.items.find((i) => i.id === parseInt(el.dataset.id, 10));
+    const p = person(it.person_id);
+    if (!confirm(`Hast du „${it.title || 'diese Idee'}“ gekauft?\n\n${p.name} sieht das nicht. Alle anderen sehen es, damit niemand dasselbe kauft.`)) return;
+    try {
+      await api(`/api/items/${it.id}/purchase`, { method: 'POST', body: { person_id: S.me } });
+      toast(`Als gekauft markiert. ${p.name} sieht das nicht.`);
+    } catch (e) { toast(e.message, 'is-error'); }
+    await refresh();
+  },
+  async unbuy(el) {
+    try {
+      await api(`/api/items/${el.dataset.id}/purchase`, { method: 'DELETE' });
+      toast('Markierung entfernt');
+    } catch (e) { toast(e.message, 'is-error'); }
+    await refresh();
+  },
   'tour-next'() { tourGo(1); },
   'tour-back'() { tourGo(-1); },
   'tour-close'() { endTour(); },
@@ -1296,7 +1331,7 @@ function tourSteps() {
     { sel: '.add', title: 'Etwas aus einem anderen Laden?', text: 'Kopier im Laden den Link. Dann tippst du hier auf „Kopierten Link einfügen“. Du kannst auch eine Idee ohne Link aufschreiben.' },
     { sel: '#my-list', title: 'Dein Wunschzettel', text: 'Hier steht alles, was du dir wünschst. Mit dem Stern ☆ markierst du deinen größten Wunsch. Mit „Löschen“ nimmst du etwas wieder herunter.' },
     { sel: '.about', title: 'Gut zu wissen', text: 'Schreib hier Größen und Vorlieben auf, zum Beispiel deine Schuhgröße. Danach auf „Speichern“ tippen.' },
-    { sel: '.garland', title: 'Geschenk für jemand anderen', text: 'Tipp oben auf die Kugel der Person, die du beschenkst. Dann siehst du ihre Wünsche. Niemand sieht, wen du beschenkst.' },
+    { sel: '.garland', title: 'Geschenk für jemand anderen', text: 'Tipp oben auf die Kugel der Person, die du beschenkst. Hast du etwas von ihrem Zettel gekauft, tipp dort auf „Hab ich gekauft“. Die Person sieht das nicht, alle anderen schon. So kauft niemand doppelt.' },
     { sel: '.helper', title: 'Das war’s!', text: 'Wenn du wieder Hilfe brauchst, drück einfach auf mich. Frohe Weihnachten!' },
   ];
 }
