@@ -17,6 +17,8 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== self.location.origin) return;
+  // Die Testversion unter /test/ nie anfassen
+  if (url.pathname.includes('/test/')) return;
   // Immer zuerst das Netz (damit Updates sofort ankommen), bei Funkloch der Zwischenspeicher
   e.respondWith(
     fetch(req, { cache: 'no-cache' }) // beim Server nachfragen, ob es eine neue Version gibt

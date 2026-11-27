@@ -707,6 +707,11 @@ function viewAdmin() {
       </div></section>`
         : ''
     }
+    <section class="paper admin__test"><div class="paper__inner">
+      <h2>Testversion</h2>
+      <p class="muted">Neue Funktionen probierst du hier aus, bevor sie für alle live gehen. Sie hat eigene Testdaten und ist nur mit deinem Admin-Passwort sichtbar.</p>
+      <a class="btn btn--ghost" href="./test/#/admin">Testversion öffnen</a>
+    </div></section>
     <p><a href="#/">Zurück zu den Wunschzetteln</a></p>
   </main>`;
 }

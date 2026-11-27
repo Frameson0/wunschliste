@@ -908,3 +908,4 @@ body.has-sheet { overflow: hidden; }
 .item.is-bought .item__title a { text-decoration: line-through; text-decoration-thickness: 1.5px; }
 .tile-bought { margin-left: 10px; font-weight: 600; color: var(--fir); }
 .tile-bought::before { content: '✓ '; }
+.admin__test .btn { margin-top: 12px; }

@@ -1,8 +1,10 @@
 name: Veröffentlichen
 
+# Branch "main" = echte Seite, Branch "test" = Testversion unter /test/ (nur mit Admin-Passwort).
+# Jeder Push baut beide, damit GitHub Pages immer beide Fassungen enthält.
 on:
   push:
-    branches: [main]
+    branches: [main, test]
   workflow_dispatch:
 
 permissions:
@@ -16,10 +18,22 @@ concurrency:
 
 jobs:
   api:
-    name: API (Cloudflare Worker)
+    name: API ${{ matrix.label }}
     runs-on: ubuntu-latest
-    outputs:
-      url: ${{ steps.deploy.outputs.url }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: live
+            ref: main
+            env_flag: ''
+            script: wichteln-api
+            db: wichteln
+          - label: test
+            ref: test
+            env_flag: '--env test'
+            script: wichteln-api-test
+            db: wichteln-test
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -39,6 +53,8 @@ jobs:
           fi
 
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.ref }}
 
       - uses: actions/setup-node@v5
         with:
@@ -50,100 +66,88 @@ jobs:
         working-directory: worker
         run: npm ci
 
-      - name: Datenbank anlegen (nur falls noch keine eingetragen ist)
-        run: |
-          if grep -q '00000000-0000-0000-0000-000000000000' worker/wrangler.toml; then
-            node scripts/ensure-d1.mjs
-          else
-            echo "Datenbank ist bereits in wrangler.toml eingetragen."
-          fi
-
       - name: Datenbank auf den neuesten Stand bringen
         working-directory: worker
         # Braucht die Token-Berechtigung "D1 · Edit". Fehlt sie, läuft der Rest trotzdem weiter.
         continue-on-error: true
-        run: npx wrangler d1 migrations apply wichteln --remote
+        run: npx wrangler d1 migrations apply ${{ matrix.db }} --remote ${{ matrix.env_flag }}
 
       - name: Worker veröffentlichen
-        id: deploy
         working-directory: worker
         run: |
           set +e
-          npx wrangler deploy > deploy.log 2>&1
+          npx wrangler deploy ${{ matrix.env_flag }} > deploy.log 2>&1
           code=$?
           set -e
           cat deploy.log
-          if [ "$code" -ne 0 ] && grep -qiE "workers\.dev subdomain|register a workers\.dev" deploy.log; then
-            echo "::error::Dein Cloudflare-Konto hat noch keine workers.dev-Subdomain. Öffne im Cloudflare-Dashboard 'Workers & Pages', richte die Subdomain ein (ein Name genügt) und starte den Workflow neu."
-            exit 1
-          fi
           if [ "$code" -ne 0 ]; then
             msg=$(grep -E "ERROR|✘" deploy.log | head -n 3 | tr '\n' ' ')
             echo "::error::Veröffentlichen des Workers fehlgeschlagen: ${msg:-siehe Log}"
             exit "$code"
           fi
-          url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -n 1 || true)
-          if [ -z "$url" ]; then
-            echo "Keine Adresse in der Ausgabe gefunden – frage die workers.dev-Subdomain bei Cloudflare ab."
-            sub=$(curl -fsS "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
-                    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result.subdomain // empty' || true)
-            if [ -n "$sub" ]; then
-              url="https://wichteln-api.$sub.workers.dev"
-              # workers.dev für diesen Worker sicher einschalten
-              curl -fsS -X POST "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/wichteln-api/subdomain" \
-                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
-                --data '{"enabled":true,"previews_enabled":false}' > /dev/null || true
-            else
-              echo "::error::Dein Cloudflare-Konto hat noch keine workers.dev-Subdomain. Öffne im Cloudflare-Dashboard 'Workers & Pages', richte die Subdomain ein (ein Name genügt) und starte den Workflow neu."
-              exit 1
-            fi
-          fi
-          echo "Worker-Adresse: $url"
-          echo "url=$url" >> "$GITHUB_OUTPUT"
+          # workers.dev-Adresse für diesen Worker sicher einschalten
+          curl -fsS -X POST "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/${{ matrix.script }}/subdomain" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+            --data '{"enabled":true,"previews_enabled":false}' > /dev/null || true
 
       - name: Admin-Passwort hinterlegen
         working-directory: worker
-        run: printf '%s' "$ADMIN_PASSWORD" | npx wrangler secret put ADMIN_PASSWORD
+        run: printf '%s' "$ADMIN_PASSWORD" | npx wrangler secret put ADMIN_PASSWORD ${{ matrix.env_flag }}
 
       - name: Schlüssel für die Amazon-Suche hinterlegen (falls eingetragen)
         working-directory: worker
         run: |
-          if [ -n "$SERPAPI_KEY" ]; then printf '%s' "$SERPAPI_KEY" | npx wrangler secret put SERPAPI_KEY; else echo "SERPAPI_KEY ist nicht gesetzt."; fi
-          if [ -n "$AMAZONSCRAPER_KEY" ]; then printf '%s' "$AMAZONSCRAPER_KEY" | npx wrangler secret put AMAZONSCRAPER_KEY; else echo "AMAZONSCRAPER_KEY ist nicht gesetzt."; fi
+          if [ -n "$SERPAPI_KEY" ]; then printf '%s' "$SERPAPI_KEY" | npx wrangler secret put SERPAPI_KEY ${{ matrix.env_flag }}; else echo "SERPAPI_KEY ist nicht gesetzt."; fi
+          if [ -n "$AMAZONSCRAPER_KEY" ]; then printf '%s' "$AMAZONSCRAPER_KEY" | npx wrangler secret put AMAZONSCRAPER_KEY ${{ matrix.env_flag }}; else echo "AMAZONSCRAPER_KEY ist nicht gesetzt."; fi
 
   site:
     name: Webseite (GitHub Pages)
     needs: api
+    # Auch veröffentlichen, wenn nur die Testversion der API gehakt hat
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.pages.outputs.page_url }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: main
+          path: live
 
-      - name: API-Adresse eintragen
+      - uses: actions/checkout@v5
+        with:
+          ref: test
+          path: test
+
+      - name: Seiten zusammenbauen
         env:
-          WORKER_URL: ${{ needs.api.outputs.url }}
           API_URL: ${{ vars.API_URL }}
         run: |
-          # Fallback: bekannte Adresse des Workers
-          url="${API_URL:-${WORKER_URL:-https://wichteln-api.jeric-kebel.workers.dev}}"
-          if [ -z "$url" ]; then
-            echo "::error::Die Adresse des Workers wurde nicht gefunden. Trag sie als Repository-Variable API_URL ein (README, Abschnitt Probleme)."
-            exit 1
-          fi
-          echo "window.WICHTEL_API = '$url';" > site/config.js
-          # Versionsnummer anhängen, damit Handys nie eine alte Fassung aus dem Zwischenspeicher zeigen
-          v="${GITHUB_SHA::7}"
-          sed -i "s/?v=dev/?v=$v/g" site/index.html
-          sed -i "s/wichteln-v2/wichteln-$v/" site/sw.js
-          echo "API: $url"
+          url="${API_URL:-https://wichteln-api.jeric-kebel.workers.dev}"
+          test_url="${url/wichteln-api./wichteln-api-test.}"
+          mkdir -p _site
+          cp -r live/site/. _site/
+          echo "window.WICHTEL_API = '$url';" > _site/config.js
+          v="$(git -C live rev-parse --short HEAD)"
+          sed -i "s/?v=dev/?v=$v/g" _site/index.html
+          sed -i "s/wichteln-v2/wichteln-$v/" _site/sw.js
+
+          mkdir -p _site/test
+          cp -r test/site/. _site/test/
+          rm -f _site/test/sw.js
+          printf "window.WICHTEL_API = '%s';\nwindow.WICHTEL_TEST = true;\n" "$test_url" > _site/test/config.js
+          tv="t$(git -C test rev-parse --short HEAD)"
+          sed -i "s/?v=dev/?v=$tv/g" _site/test/index.html
+          # Testversion nicht als App installierbar machen und nicht in Suchmaschinen
+          sed -i 's#<link rel="manifest" href="manifest.webmanifest">#<meta name="robots" content="noindex">#' _site/test/index.html
+          echo "Live: $url  ·  Test: $test_url"
 
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v4
         with:
-          path: site
+          path: _site
 
       - name: Auf GitHub Pages veröffentlichen
         id: pages
