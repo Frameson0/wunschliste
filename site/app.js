@@ -599,7 +599,7 @@ function addBox() {
       <label for="add-url">Link einfügen</label>
       <div class="add__row">
         <input id="add-url" type="url" inputmode="url" autocomplete="off" placeholder="https://…" ${busy}>
-        <button class="btn ${search ? 'btn--ghost' : 'btn--primary'}" type="submit" ${busy}>Vorschau holen</button>
+        <button class="btn ${search ? 'btn--ghost' : 'btn--primary'}" type="submit" ${busy}>Hinzufügen</button>
       </div>
     </form>
     <p class="add__alt">
