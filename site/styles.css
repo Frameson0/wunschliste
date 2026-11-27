@@ -973,3 +973,95 @@ body.has-sheet { overflow: hidden; }
 @media (max-width: 700px) {
   .garland--many .bauble__name { flex-direction: column; align-items: center; gap: 1px; }
 }
+
+/* ===== Code-Eingabe ===== */
+.pin { display: flex; flex-direction: column; align-items: center; padding-top: 36px; }
+.pin .choose__text { margin-top: 18px; }
+.pin__ball {
+  width: 84px; height: 84px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 2.2rem; font-weight: 720; color: #fff;
+  background:
+    radial-gradient(circle at 31% 28%, rgba(255, 255, 255, 0.42) 0 13%, transparent 14%),
+    radial-gradient(circle at 50% 120%, rgba(0, 0, 0, 0.16), transparent 60%),
+    var(--c);
+  box-shadow: 0 8px 18px -8px color-mix(in srgb, var(--c) 70%, #000);
+}
+.pin__ball.is-light { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
+.pin__form { margin-top: 26px; display: flex; flex-direction: column; align-items: center; gap: 14px; width: min(100%, 300px); }
+.pin__form input {
+  width: 100%; text-align: center; font-size: 2.4rem; font-weight: 700; letter-spacing: 0.6em; text-indent: 0.6em;
+  padding: 12px 8px; border-radius: 16px; border: 2px solid var(--mist-strong); background: #fff; color: var(--fir);
+}
+.pin__form input::placeholder { letter-spacing: 0.6em; color: var(--mist-strong); }
+.pin__form input:focus { outline: none; border-color: var(--fir); box-shadow: 0 0 0 4px color-mix(in srgb, var(--fir) 15%, transparent); }
+.pin__go { width: 100%; padding-top: 14px; padding-bottom: 14px; font-size: 1.1rem; }
+.pin__form.is-wrong input { animation: pin-shake 0.42s; border-color: var(--berry); }
+@keyframes pin-shake { 20%, 60% { transform: translateX(-9px); } 40%, 80% { transform: translateX(9px); } }
+@media (prefers-reduced-motion: reduce) { .pin__form.is-wrong input { animation: none; } }
+.pin__reveal { margin-top: 14px; font-size: 1.15rem; min-height: 1.5em; }
+.pin__reveal strong { font-size: 1.5rem; letter-spacing: 0.15em; color: var(--berry); }
+.pin__more { margin-top: 18px; display: flex; flex-direction: column; align-items: center; gap: 14px; max-width: 26rem; }
+.pin__forgot { font-size: 0.95rem; color: var(--fir-soft); }
+.pin__forgot.is-asking { color: var(--berry); font-weight: 650; }
+
+.person-row--pin { grid-template-columns: minmax(8rem, 12rem) 5.5rem 1fr auto; }
+.pin-field { display: flex; flex-direction: column; font-size: 0.72rem; font-weight: 600; color: var(--fir-soft); }
+.pin-field span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.pin-field input { font-variant-numeric: tabular-nums; letter-spacing: 0.2em; text-align: center; font-weight: 650; }
+.pin-note { grid-column: 1 / -1; font-size: 0.85rem; color: var(--berry); }
+@media (max-width: 640px) {
+  .person-row--pin { grid-template-columns: 1fr 6rem; }
+  .person-row--pin .swatches, .person-row--pin .person-row__actions { grid-column: 1 / -1; }
+  .pin-field span { position: static; width: auto; height: auto; clip: auto; }
+}
+
+/* ===== Allgemeines Design (außerhalb der Weihnachtszeit) =====
+   Papier  #F7F4EF  Hintergrund
+   Tinte   #1E2B3C  Text, Kopfleiste
+   Koralle #E0553F  Aktionen
+   Honig   #EFB03F  Herzenswunsch
+*/
+body.theme-plain {
+  --snow: #f7f4ef;
+  --fir: #1e2b3c;
+  --fir-soft: #5b6676;
+  --mist: #e5dfd6;
+  --mist-strong: #cdc5b8;
+  --berry: #e0553f;
+  --berry-deep: #c4432f;
+  --mustard: #efb03f;
+  --brass: #c9bda8;
+}
+/* Statt Girlande mit Kugeln: Namen als Kreise in einer Reihe */
+.theme-plain .garland__rope,
+.theme-plain .bauble__string,
+.theme-plain .bauble__cap { display: none; }
+.theme-plain .garland ul { flex-wrap: wrap; justify-content: center; gap: 14px 6px; padding-top: 22px; }
+.theme-plain .garland li { flex: 0 0 auto; padding-top: 0; min-width: calc(var(--ball) + 26px); }
+.theme-plain .garland--big ul { padding-top: 34px; gap: 22px 10px; }
+.theme-plain .bauble__ball,
+.theme-plain .family-card__ball,
+.theme-plain .pin__ball {
+  background: radial-gradient(circle at 50% 120%, rgba(0, 0, 0, 0.12), transparent 60%), var(--c);
+}
+.theme-plain .bauble:hover, .theme-plain .bauble:active { animation: none; }
+.theme-plain .bauble { transition: transform 0.18s; }
+@media (hover: hover) { .theme-plain .bauble:hover { transform: translateY(-3px); } }
+.theme-plain .garland.is-entering .bauble { animation-name: pop-in; animation-duration: 0.5s; }
+@keyframes pop-in { from { transform: scale(0.6); opacity: 0; } to { transform: none; opacity: 1; } }
+.theme-plain .btn--shop:hover, .theme-plain .amazon-cta:hover { background: #121b28; }
+.theme-plain input::placeholder, .theme-plain textarea::placeholder { color: #a39b90; }
+.theme-plain .helper__sign { background: #fff; border-color: var(--fir); box-shadow: 0 4px 0 rgba(30, 43, 60, 0.18); transform: rotate(-2deg); }
+.theme-plain .helper__sign::after { background: var(--fir); }
+@media (hover: hover) { .theme-plain .helper:hover .helper__sign { background: #fff8ec; } }
+.theme-plain .paper { filter: drop-shadow(0 1px 0 rgba(30, 43, 60, 0.07)) drop-shadow(0 10px 22px rgba(30, 43, 60, 0.07)); }
+@media (max-width: 700px) {
+  .theme-plain .garland { --ball: 40px; }
+  .theme-plain .garland--big { --ball: 50px; }
+}
+@media (max-width: 420px) {
+  .brand { font-size: 1.12rem; }
+  .topbar { gap: 8px; }
+  .topbar__left { gap: 7px; }
+  .ctx { font-size: 0.85rem; padding: 3px 8px 3px 10px; }
+}

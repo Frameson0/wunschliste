@@ -1,11 +1,11 @@
-// Wichteln – Wunschzettel für die Familie
+// Wunschliste – Wunschzettel für die Familie
 // Reines JavaScript ohne Build-Schritt. Daten kommen vom Cloudflare Worker (window.WICHTEL_API).
 
 const API = String(window.WICHTEL_API || '').replace(/\/+$/, '');
 // Die Testversion läuft unter /test/ auf derselben Adresse und bekommt eigene Speicher-Schlüssel
 const TEST = Boolean(window.WICHTEL_TEST);
 const PFX = TEST ? 'wichteln.test.' : 'wichteln.';
-const KEYS = { me: `${PFX}me`, admin: `${PFX}admin`, family: `${PFX}family`, group: (fid) => `${PFX}group.${fid}` };
+const KEYS = { token: `${PFX}token`, admin: `${PFX}admin`, family: `${PFX}family`, group: (fid) => `${PFX}group.${fid}` };
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -16,8 +16,12 @@ const S = {
   data: null,
   family: parseInt(store.get(KEYS.family), 10) || null,
   viewRound: null,
-  meStored: parseInt(store.get(KEYS.me), 10) || null,
-  me: null,         // gewählte Person, wenn sie in der angezeigten Gruppe mitmacht
+  token: store.get(KEYS.token) || '',
+  viewer: null,     // mit Code angemeldete Person
+  me: null,         // angemeldete Person, wenn sie in der angezeigten Gruppe mitmacht
+  pinFor: null,     // Person, deren Code gerade abgefragt wird
+  forgot: 0,        // Schritt beim "Code vergessen"
+  pins: [],         // Codes für die Verwaltung
   // In der Testversion gilt auch das Passwort, mit dem du auf der Live-Seite angemeldet bist
   adminKey: store.get(KEYS.admin) || (TEST ? store.get('wichteln.admin') || '' : ''),
   needAdmin: false,
@@ -72,6 +76,20 @@ function budgetText(r) {
   return '';
 }
 
+// Weihnachts-Look nur, wenn der Termin der Gruppe in der Weihnachtszeit liegt (1. Dezember bis 6. Januar).
+// Ohne Termin entscheidet der Name ("Weihnachten", "Wichteln", "Advent" …).
+function xmasDate(str) {
+  const d = new Date(`${str}T00:00:00`);
+  if (isNaN(d)) return false;
+  return d.getMonth() === 11 || (d.getMonth() === 0 && d.getDate() <= 6);
+}
+function isXmas() {
+  const r = S.data && S.data.round;
+  if (!r) return false;
+  if (r.exchange_date) return xmasDate(r.exchange_date);
+  return /weihnacht|wichtel|advent|nikolaus|christmas|xmas/i.test(r.title || '');
+}
+
 function exchangeText(r) {
   if (!r || !r.exchange_date) return '';
   const d = new Date(`${r.exchange_date}T00:00:00`);
@@ -80,10 +98,16 @@ function exchangeText(r) {
   today.setHours(0, 0, 0, 0);
   const days = Math.round((d - today) / 86400000);
   const date = d.toLocaleDateString('de-DE', { day: 'numeric', month: 'long' });
-  if (days > 1) return `Bescherung am ${date}, in ${days} Tagen`;
-  if (days === 1) return `Bescherung morgen, am ${date}`;
-  if (days === 0) return 'Heute ist Bescherung!';
-  return `Bescherung war am ${date}`;
+  if (xmasDate(r.exchange_date)) {
+    if (days > 1) return `Bescherung am ${date}, in ${days} Tagen`;
+    if (days === 1) return `Bescherung morgen, am ${date}`;
+    if (days === 0) return 'Heute ist Bescherung!';
+    return `Bescherung war am ${date}`;
+  }
+  if (days > 1) return `Am ${date}, in ${days} Tagen`;
+  if (days === 1) return `Morgen ist es so weit (${date})`;
+  if (days === 0) return 'Heute ist es so weit!';
+  return `War am ${date}`;
 }
 
 let toastTimer;
@@ -96,15 +120,16 @@ function toast(msg, kind = '') {
 }
 
 async function api(path, { method = 'GET', body, admin = false } = {}) {
-  if (!API) throw new Error('Die Adresse der Wichtel-API fehlt in config.js.');
+  if (!API) throw new Error('Die Adresse der API fehlt in config.js.');
   const headers = {};
   if (body) headers['Content-Type'] = 'application/json';
   if (admin || TEST) headers['X-Admin-Key'] = S.adminKey;
+  if (S.token) headers['X-Person-Token'] = S.token;
   let res;
   try {
     res = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   } catch {
-    throw new Error('Keine Verbindung zur Wichtel-API. Prüf deine Internetverbindung und versuch es noch mal.');
+    throw new Error('Keine Verbindung zum Server. Prüf deine Internetverbindung und versuch es noch mal.');
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -123,7 +148,6 @@ async function load() {
     if (!S.viewRound) S.viewRound = parseInt(store.get(KEYS.group(S.family)), 10) || null;
     if (S.viewRound) qs.set('round', S.viewRound);
   }
-  if (S.meStored) qs.set('viewer', S.meStored);
   const d = await api(`/api/state${qs.toString() ? `?${qs}` : ''}`);
   S.data = d;
   S.error = null;
@@ -131,14 +155,21 @@ async function load() {
   if (d.family && d.family.id !== S.family) setFamily(d.family.id);
   if (!d.family && S.family) setFamily(null);
   if (S.viewRound && !d.rounds.some((r) => r.id === S.viewRound)) setGroup(null);
-  S.me = S.meStored && d.members.includes(S.meStored) ? S.meStored : null;
+  if (S.token && !d.viewer) setToken(''); // Code wurde geändert: neu anmelden
+  S.viewer = d.viewer;
+  S.me = d.viewer && d.members.includes(d.viewer) ? d.viewer : null;
+  if (S.adminOk && route().view === 'admin' && d.family) {
+    S.pins = await api(`/api/admin/pins?family=${d.family.id}`, { admin: true }).catch(() => []);
+  }
 }
 
-function setMe(id) {
-  S.meStored = id;
-  S.me = id;
-  store.set(KEYS.me, id ? String(id) : null);
+function setToken(token) {
+  S.token = token || '';
+  store.set(KEYS.token, token || null);
+  if (!token) { S.viewer = null; S.me = null; }
 }
+
+const logout = () => setToken('');
 
 function setFamily(id) {
   S.family = id;
@@ -211,7 +242,7 @@ function topbar() {
   ${TEST ? '<div class="testbar" role="note"><strong>Testversion</strong> · nur für dich sichtbar · eigene Testdaten</div>' : ''}
   <header class="topbar">
     <span class="topbar__left">
-      <a class="brand" href="#/">Wichteln</a>
+      <a class="brand" href="#/">Wunschliste</a>
       ${family() ? `<button class="ctx" type="button" data-act="switch-family" aria-label="Familie wechseln, gerade: ${esc(family().name)}">${esc(family().name)}<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3"/></svg></button>` : ''}
     </span>
     ${
@@ -248,11 +279,30 @@ const REINDEER_SVG = `
   <circle cx="60" cy="113" r="3.6" fill="#e3a82b"/>
 </svg>`;
 
+// Außerhalb der Weihnachtszeit hilft ein kleines Geschenk statt des Rentiers
+const GIFT_SVG = `
+<svg class="reindeer gift" viewBox="0 0 120 130" aria-hidden="true">
+  <path d="M60 42 C48 20 26 22 32 38 C35 45 50 44 60 42 Z" fill="#efb03f"/>
+  <path d="M60 42 C72 20 94 22 88 38 C85 45 70 44 60 42 Z" fill="#efb03f"/>
+  <path d="M60 42 C52 31 41 30 40 36" fill="none" stroke="#c98a1c" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M60 42 C68 31 79 30 80 36" fill="none" stroke="#c98a1c" stroke-width="2.4" stroke-linecap="round"/>
+  <rect x="24" y="42" width="72" height="18" rx="5" fill="#c4432f"/>
+  <rect x="30" y="58" width="60" height="58" rx="7" fill="#e0553f"/>
+  <rect x="54" y="42" width="12" height="74" fill="#efb03f"/>
+  <circle cx="60" cy="42" r="6" fill="#f6c766"/>
+  <circle cx="43" cy="78" r="4.2" fill="#1e2b3c"/><circle cx="77" cy="78" r="4.2" fill="#1e2b3c"/>
+  <circle cx="44.3" cy="76.6" r="1.4" fill="#fff"/><circle cx="78.3" cy="76.6" r="1.4" fill="#fff"/>
+  <circle cx="38" cy="90" r="4.5" fill="#f19a8b"/><circle cx="82" cy="90" r="4.5" fill="#f19a8b"/>
+  <path d="M48 92 Q60 102 72 92" fill="none" stroke="#1e2b3c" stroke-width="2.6" stroke-linecap="round"/>
+  <ellipse cx="44" cy="120" rx="8" ry="4.5" fill="#c4432f"/><ellipse cx="76" cy="120" rx="8" ry="4.5" fill="#c4432f"/>
+</svg>`;
+const helperSvg = () => (isXmas() ? REINDEER_SVG : GIFT_SVG);
+
 function helper() {
   return `
   <div class="helper-wrap">
     <button class="helper" type="button" data-act="tour" aria-label="Hilfe: Wie geht das alles? Kurze Anleitung starten">
-      ${REINDEER_SVG}
+      ${helperSvg()}
       <span class="helper__sign" aria-hidden="true"><span>Hilfe!</span> Wie geht das alles?</span>
     </button>
   </div>`;
@@ -369,6 +419,32 @@ function viewNoGroup() {
   ${footer()}`;
 }
 
+function viewPin() {
+  const p = person(S.pinFor);
+  if (!p) { S.pinFor = null; return viewPicker(); }
+  return `
+  ${topbar()}
+  <main id="main" class="choose pin" style="--c:${esc(p.color)}">
+    <span class="pin__ball ${isLight(p.color) ? 'is-light' : ''}" aria-hidden="true">${esc(p.name.slice(0, 1).toUpperCase())}</span>
+    <div class="choose__text">
+      <h1>Hallo ${esc(p.name)}!</h1>
+      <p>Gib deinen 4-stelligen Code ein.</p>
+    </div>
+    <form class="pin__form" data-form="pin-login" autocomplete="off">
+      <label class="sr" for="pin">Code für ${esc(p.name)}</label>
+      <input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="one-time-code" enterkeyhint="go" placeholder="····" aria-describedby="pin-hint">
+      <button class="btn btn--primary pin__go" type="submit">Weiter</button>
+    </form>
+    <p class="pin__reveal" role="status"></p>
+    <div class="pin__more">
+      <button class="btn btn--ghost" type="button" data-act="pin-back">Ich bin jemand anderes</button>
+      ${S.forgot < 4 ? `<button class="linklike pin__forgot ${S.forgot ? 'is-asking' : ''}" type="button" data-act="forgot">${esc(forgotLabel(p))}</button>` : ''}
+      <p class="hint" id="pin-hint">Den Code bekommst du von Eric. Wer „Code vergessen“ benutzt, sieht Eric in der Verwaltung.</p>
+    </div>
+  </main>
+  ${footer()}`;
+}
+
 function viewPicker() {
   const list = members();
   return `
@@ -377,7 +453,7 @@ function viewPicker() {
     ${garland(list, { big: true, pick: true })}
     <div class="picker__text">
       <h1>Wer bist du?</h1>
-      <p>Tipp auf deine Kugel. Danach füllst du deinen Wunschzettel und schaust, was sich die anderen wünschen.</p>
+      <p>Tipp auf ${isXmas() ? 'deine Kugel' : 'deinen Namen'}. Danach füllst du deinen Wunschzettel und schaust, was sich die anderen wünschen.</p>
       ${list.length ? '' : '<p class="empty">In dieser Gruppe ist noch niemand eingetragen. Das geht in der Verwaltung.</p>'}
     </div>
   </main>
@@ -394,7 +470,7 @@ function viewHome() {
   ${garland(members())}
   <main id="main" class="home">
     <div class="intro">
-      <h1>${esc(r ? r.title : 'Wichteln')}</h1>
+      <h1>${esc(r ? r.title : 'Wunschliste')}</h1>
       ${facts ? `<p class="facts">${facts}</p>` : ''}
     </div>
     <div class="sheets">
@@ -539,13 +615,13 @@ function shareHelp() {
     <ol class="steps">
       <li>${
         S.installPrompt
-          ? 'Installiere Wichteln als App: <button class="btn btn--primary btn--small" type="button" data-act="install">Als App installieren</button>'
+          ? 'Installiere die Wunschliste als App: <button class="btn btn--primary btn--small" type="button" data-act="install">Als App installieren</button>'
           : isStandalone()
-            ? 'Wichteln ist schon als App installiert.'
-            : 'Installiere Wichteln als App: In Chrome oben rechts auf <strong>⋮</strong> und dann <strong>App installieren</strong> bzw. <strong>Zum Startbildschirm hinzufügen</strong>.'
+            ? 'Die Wunschliste ist schon als App installiert.'
+            : 'Installiere die Wunschliste als App: In Chrome oben rechts auf <strong>⋮</strong> und dann <strong>App installieren</strong> bzw. <strong>Zum Startbildschirm hinzufügen</strong>.'
       }</li>
-      <li>In der Amazon-App (oder jeder anderen App) beim Artikel auf <strong>Teilen</strong> tippen und <strong>Wichteln</strong> wählen.</li>
-      <li>Wichteln öffnet sich mit der Vorschau. Ein Tippen auf „Auf den Wunschzettel“, fertig.</li>
+      <li>In der Amazon-App (oder jeder anderen App) beim Artikel auf <strong>Teilen</strong> tippen und <strong>Wunschliste</strong> wählen.</li>
+      <li>Die Wunschliste öffnet sich mit der Vorschau. Ein Tippen auf „Auf den Wunschzettel“, fertig.</li>
     </ol>`;
   const first = isIOS() ? ['iPhone', ios, 'Android', android] : ['Android', android, 'iPhone', ios];
   return `
@@ -721,6 +797,12 @@ function viewPerson(id) {
 
 // ---------- Verwaltung ----------
 
+const pinOf = (id) => S.pins.find((x) => x.id === id) || {};
+const fmtDay = (s) => {
+  const d = new Date(String(s || '').replace(' ', 'T') + 'Z');
+  return isNaN(d) ? '' : d.toLocaleDateString('de-DE', { day: 'numeric', month: 'long' });
+};
+
 function viewAdmin() {
   if (!S.adminOk) {
     return `
@@ -827,7 +909,7 @@ function viewAdmin() {
         <div class="grid2">
           <label class="field"><span>Name der Gruppe</span><input name="title" value="${esc(r.title)}" maxlength="80"></label>
           <label class="field"><span>Jahr</span><input name="year" type="number" value="${r.year}"></label>
-          <label class="field"><span>Bescherung</span><input name="exchange_date" type="date" value="${esc(r.exchange_date || '')}"></label>
+          <label class="field"><span>Termin (Bescherung, Geburtstag …)</span><input name="exchange_date" type="date" value="${esc(r.exchange_date || '')}"></label>
           <span></span>
           <label class="field"><span>Budget von (€)</span><input name="budget_min" type="number" min="0" value="${r.budget_min ?? ''}"></label>
           <label class="field"><span>Budget bis (€)</span><input name="budget_max" type="number" min="0" value="${r.budget_max ?? ''}"></label>
@@ -841,12 +923,12 @@ function viewAdmin() {
   const newBox = `
     <section class="paper"><div class="paper__inner">
       <h2>Neue Gruppe anlegen</h2>
-      <p class="muted">Zum Beispiel fürs Wichteln oder eine Wunschliste zu Weihnachten oder zum Geburtstag. Ältere Gruppen bleiben erhalten.</p>
+      <p class="muted">Zum Beispiel fürs Wichteln, für Weihnachten oder einen Geburtstag. Liegt der Termin zwischen 1. Dezember und 6. Januar, sieht die Liste weihnachtlich aus. Ältere Gruppen bleiben erhalten.</p>
       <form data-form="admin-new-round" class="stack">
         <div class="grid2">
-          <label class="field"><span>Name der Gruppe</span><input name="title" maxlength="80" placeholder="z. B. Wichteln ${esc(fam.name)} ${String(thisYear).slice(2)}" required></label>
+          <label class="field"><span>Name der Gruppe</span><input name="title" maxlength="80" placeholder="z. B. Weihnachten ${esc(fam.name)} ${String(thisYear).slice(2)}" required></label>
           <label class="field"><span>Jahr</span><input name="year" type="number" value="${thisYear}" required></label>
-          <label class="field"><span>Bescherung</span><input name="exchange_date" type="date" value="${thisYear}-12-24"></label>
+          <label class="field"><span>Termin (Bescherung, Geburtstag …)</span><input name="exchange_date" type="date"></label>
           <span></span>
           <label class="field"><span>Budget von (€)</span><input name="budget_min" type="number" min="0"></label>
           <label class="field"><span>Budget bis (€)</span><input name="budget_max" type="number" min="0"></label>
@@ -871,9 +953,11 @@ function viewAdmin() {
         ${famPeople
           .map(
             (p) => `
-          <li><form data-form="admin-person" data-id="${p.id}" class="person-row">
+          <li><form data-form="admin-person" data-id="${p.id}" class="person-row person-row--pin">
             <input name="name" value="${esc(p.name)}" maxlength="40" aria-label="Name">
+            <label class="pin-field"><span>Code</span><input name="pin" value="${esc(pinOf(p.id).pin || '')}" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" aria-label="Code von ${esc(p.name)}"></label>
             ${colorSelect(`color-${p.id}`, p.color)}
+            ${pinOf(p.id).pin_reveals ? `<span class="pin-note">Hat „Code vergessen“ ${pinOf(p.id).pin_reveals}× benutzt, zuletzt ${esc(fmtDay(pinOf(p.id).pin_revealed_at))}</span>` : ''}
             <span class="person-row__actions">
               <button class="btn btn--ghost btn--small" type="submit">Speichern</button>
               <button class="btn btn--ghost btn--small btn--danger" type="button" data-act="admin-del-person" data-id="${p.id}">Entfernen</button>
@@ -924,7 +1008,8 @@ function render() {
   }
   if (TEST && (S.needAdmin || !S.adminKey)) {
     app.innerHTML = viewTestLogin();
-    document.title = 'Test – Wichteln';
+    applyTheme();
+    document.title = 'Test – Wunschliste';
     return;
   }
   if (!S.data) return;
@@ -934,17 +1019,27 @@ function render() {
   else if (!family()) html = viewFamilyPicker();
   else if (!round()) html = viewNoGroup();
   else if (needGroupChoice()) html = viewGroupPicker();
+  else if (S.pinFor) html = viewPin();
   else if (!S.me) html = viewPicker();
   else if (r.view === 'person') html = viewPerson(r.id);
   else html = viewHome();
   app.innerHTML = html;
-  document.title = `${TEST ? 'Test – ' : ''}${r.view === 'person' && person(r.id) ? `${person(r.id).name} – ` : ''}Wichteln`;
+  applyTheme();
+  document.title = `${TEST ? 'Test – ' : ''}${r.view === 'person' && person(r.id) ? `${person(r.id).name} – ` : ''}Wunschliste`;
   if (S.firstPaint) requestAnimationFrame(() => setTimeout(() => (S.firstPaint = false), 50));
+}
+
+function applyTheme() {
+  const x = isXmas();
+  document.body.classList.toggle('theme-xmas', x);
+  document.body.classList.toggle('theme-plain', !x);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = x ? '#123B2F' : '#1E2B3C';
 }
 
 function busyTyping() {
   const a = document.activeElement;
-  return Boolean(S.draft || S.editing || S.sheet.open || S.tour || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
+  return Boolean(S.pinFor || S.draft || S.editing || S.sheet.open || S.tour || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
 }
 
 async function refresh({ quiet = false } = {}) {
@@ -1022,9 +1117,32 @@ const actions = {
     resetBrowse();
   },
   async pick(el) {
-    setMe(parseInt(el.dataset.id, 10));
-    if (sessionStorage.getItem(SHARE_KEY)) processShare();
-    else location.hash = `#/p/${S.me}`;
+    const id = parseInt(el.dataset.id, 10);
+    if (id === S.viewer) return afterLogin();
+    S.pinFor = id;
+    S.forgot = 0;
+    render();
+    const inp = $('#pin');
+    if (inp) inp.focus();
+  },
+  'pin-back'() { S.pinFor = null; S.forgot = 0; render(); },
+  async forgot() {
+    const p = person(S.pinFor);
+    if (S.forgot < 3) {
+      S.forgot += 1;
+      const b = $('[data-act="forgot"]');
+      if (b) { b.textContent = forgotLabel(p); b.classList.add('is-asking'); b.focus(); }
+      return;
+    }
+    try {
+      const res = await api(`/api/people/${p.id}/forgot`, { method: 'POST' });
+      S.forgot = 4;
+      render();
+      const msg = $('.pin__reveal');
+      if (msg) msg.innerHTML = `Dein Code ist <strong>${esc(res.pin)}</strong>. Merk ihn dir gut!`;
+      const inp = $('#pin');
+      if (inp) { inp.value = res.pin; inp.focus(); }
+    } catch (e) { toast(e.message, 'is-error'); }
   },
   'sheet-open'(el) { openSheet(el); },
   tour() { startTour(); },
@@ -1033,7 +1151,7 @@ const actions = {
     const p = person(it.person_id);
     if (!confirm(`Hast du „${it.title || 'diese Idee'}“ gekauft?\n\n${p.name} sieht das nicht. Alle anderen sehen es, damit niemand dasselbe kauft.`)) return;
     try {
-      await api(`/api/items/${it.id}/purchase`, { method: 'POST', body: { person_id: S.me } });
+      await api(`/api/items/${it.id}/purchase`, { method: 'POST' });
       toast(`Als gekauft markiert. ${p.name} sieht das nicht.`);
     } catch (e) { toast(e.message, 'is-error'); }
     await refresh();
@@ -1087,7 +1205,7 @@ const actions = {
     pr.prompt();
     const choice = await pr.userChoice.catch(() => null);
     S.installPrompt = null;
-    if (choice && choice.outcome === 'accepted') toast('Wichteln wird installiert');
+    if (choice && choice.outcome === 'accepted') toast('Die Wunschliste wird installiert');
     render();
   },
   async copy(el) {
@@ -1095,7 +1213,8 @@ const actions = {
     catch { toast('Kopieren ging nicht. Bitte von Hand markieren.', 'is-error'); }
   },
   switch() {
-    setMe(null);
+    logout();
+    S.pinFor = null;
     S.draft = null;
     S.editing = null;
     location.hash = '#/';
@@ -1165,7 +1284,7 @@ const actions = {
     const fam = family();
     if (!confirm(`${p.name} aus der Familie ${fam.name} entfernen? Die Wunschzettel von ${p.name} in allen Gruppen dieser Familie werden dabei gelöscht.`)) return;
     const res = await adminCall(`/api/admin/people/${p.id}?family=${fam.id}`, { method: 'DELETE' }, `${p.name} ist nicht mehr in der Familie ${fam.name}`);
-    if (res && res.deleted && S.meStored === p.id) setMe(null);
+    if (res && res.deleted && S.viewer === p.id) logout();
   },
   async 'admin-toggle-round'(el) {
     const r = S.data.rounds.find((x) => x.id === parseInt(el.dataset.id, 10));
@@ -1198,7 +1317,37 @@ async function adminCall(path, opts, okMsg) {
   }
 }
 
+function forgotLabel(p) {
+  return ['Code vergessen?', `Bist du wirklich ${p.name}?`, 'Ganz sicher?', 'Kein Schummeln?'][S.forgot] || 'Code vergessen?';
+}
+
+function afterLogin() {
+  S.pinFor = null;
+  S.forgot = 0;
+  if (sessionStorage.getItem(SHARE_KEY)) return processShare();
+  if (location.hash !== `#/p/${S.me}`) location.hash = `#/p/${S.me}`;
+  else render();
+}
+
 const forms = {
+  async 'pin-login'(f) {
+    const pin = f.pin.value.replace(/\D/g, '');
+    if (pin.length !== 4) return f.pin.focus();
+    const btn = f.querySelector('[type="submit"]');
+    btn.disabled = true;
+    try {
+      const res = await api('/api/login', { method: 'POST', body: { person_id: S.pinFor, pin } });
+      setToken(res.token);
+      await load();
+      afterLogin();
+    } catch (e) {
+      btn.disabled = false;
+      f.pin.value = '';
+      f.classList.remove('is-wrong'); void f.offsetWidth; f.classList.add('is-wrong');
+      toast(e.message, 'is-error');
+      f.pin.focus();
+    }
+  },
   preview(f) { loadPreview(f.querySelector('#add-url').value); },
   finder(f) {
     const q = f.querySelector('#finder-q').value.trim();
@@ -1250,8 +1399,7 @@ const forms = {
       S.adminOk = true;
       S.needAdmin = false;
       store.set(KEYS.admin, S.adminKey);
-      if (TEST || !S.data) await refresh();
-      else render();
+      await refresh();
     } catch (e) { toast(e.message, 'is-error'); }
   },
   async 'admin-round'(f) {
@@ -1269,7 +1417,9 @@ const forms = {
   async 'admin-person'(f) {
     const id = f.dataset.id;
     const color = (f.querySelector(`[name="color-${id}"]:checked`) || {}).value;
-    await adminCall(`/api/admin/people/${id}`, { method: 'PATCH', body: { name: f.name.value, color } }, 'Gespeichert');
+    const body = { name: f.name.value, color };
+    if (f.pin.value) body.pin = f.pin.value.trim();
+    await adminCall(`/api/admin/people/${id}`, { method: 'PATCH', body }, 'Gespeichert');
   },
   async 'admin-add-person'(f) {
     const color = (f.querySelector('[name="color-new"]:checked') || {}).value;
@@ -1558,18 +1708,18 @@ function processShare() {
   loadPreview(share.url, share.title);
 }
 
-// ---------- Kleine Anleitung (Rentier) ----------
+// ---------- Kleine Anleitung (Rentier bzw. Geschenk) ----------
 
 function tourSteps() {
   if (!S.me) {
     return [
-      { sel: '.garland', title: 'Wer bist du?', text: 'Jede Kugel ist eine Person aus der Familie. Tipp auf die Kugel mit deinem Namen.' },
-      { sel: '.helper', title: 'Danach geht es weiter', text: 'Wenn du deine Kugel angetippt hast, drück noch einmal auf mich. Dann zeige ich dir den Rest.' },
+      { sel: '.garland', title: 'Wer bist du?', text: `Jede${isXmas() ? ' Kugel' : 'r Kreis'} ist eine Person aus der Familie. Tipp auf deinen Namen und gib deinen Code ein.` },
+      { sel: '.helper', title: 'Danach geht es weiter', text: 'Wenn du angemeldet bist, drück noch einmal auf mich. Dann zeige ich dir den Rest.' },
     ];
   }
   const me = person(S.me);
   return [
-    { sel: '.garland', title: 'Das ist die Familie', text: `Jede Kugel ist eine Person. Deine Kugel ist mit „du“ markiert, ${esc(me ? me.name : '')}.` },
+    { sel: '.garland', title: 'Das ist die Familie', text: `Jede${isXmas() ? ' Kugel' : 'r Kreis'} ist eine Person. Dein${isXmas() ? 'e Kugel' : ' Kreis'} ist mit „du“ markiert, ${esc(me ? me.name : '')}.` },
     { sel: '.finder', title: 'Wünsche finden', text: 'Schreib hier hinein, was du dir wünschst, zum Beispiel „Tee“. Dann tippst du auf „Suchen“.' },
     {
       sel: '.finder',
@@ -1580,8 +1730,8 @@ function tourSteps() {
     { sel: '.add', title: 'Etwas aus einem anderen Laden?', text: 'Kopier im Laden den Link. Dann tippst du hier auf „Kopierten Link einfügen“. Du kannst auch eine Idee ohne Link aufschreiben.' },
     { sel: '#my-list', title: 'Dein Wunschzettel', text: 'Hier steht alles, was du dir wünschst. Mit dem Stern ☆ markierst du deinen größten Wunsch. Mit „Löschen“ nimmst du etwas wieder herunter.' },
     { sel: '.about', title: 'Gut zu wissen', text: 'Schreib hier Größen und Vorlieben auf, zum Beispiel deine Schuhgröße. Danach auf „Speichern“ tippen.' },
-    { sel: '.garland', title: 'Geschenk für jemand anderen', text: 'Tipp oben auf die Kugel der Person, die du beschenkst. Hast du etwas von ihrem Zettel gekauft, tipp dort auf „Hab ich gekauft“. Die Person sieht das nicht, alle anderen schon. So kauft niemand doppelt.' },
-    { sel: '.helper', title: 'Das war’s!', text: 'Wenn du wieder Hilfe brauchst, drück einfach auf mich. Frohe Weihnachten!' },
+    { sel: '.garland', title: 'Geschenk für jemand anderen', text: `Tipp oben auf ${isXmas() ? 'die Kugel' : 'den Namen'} der Person, die du beschenkst. Hast du etwas von ihrem Zettel gekauft, tipp dort auf „Hab ich gekauft“. Die Person sieht das nicht, alle anderen schon. So kauft niemand doppelt.` },
+    { sel: '.helper', title: 'Das war’s!', text: `Wenn du wieder Hilfe brauchst, drück einfach auf mich. ${isXmas() ? 'Frohe Weihnachten!' : 'Viel Spaß beim Wünschen!'}` },
   ];
 }
 
@@ -1635,7 +1785,7 @@ function showTourStep() {
       <div class="tour__block"></div>
       <div class="tour__spot" aria-hidden="true"></div>
       <div class="tour__bubble">
-        <div class="tour__top">${REINDEER_SVG}<span class="tour__count">Schritt ${i + 1} von ${steps.length}</span></div>
+        <div class="tour__top">${helperSvg()}<span class="tour__count">Schritt ${i + 1} von ${steps.length}</span></div>
         <h2 id="tour-title">${st.title}</h2>
         <p id="tour-text">${st.text}</p>
         ${st.demo || ''}
@@ -1716,6 +1866,10 @@ document.addEventListener('change', (ev) => {
 
 document.addEventListener('input', (ev) => {
   const t = ev.target;
+  if (t.id === 'pin') {
+    t.value = t.value.replace(/\D/g, '').slice(0, 4);
+    if (t.value.length === 4) t.form.requestSubmit();
+  }
   // Neue Gruppe: Bescherungsdatum wandert mit dem Jahr mit
   if (t.name === 'year' && t.form && t.form.dataset.form === 'admin-new-round' && /^\d{4}$/.test(t.value)) {
     const d = t.form.exchange_date;
@@ -1750,6 +1904,7 @@ window.addEventListener('hashchange', () => {
   if (S.tour) endTour();
   S.draft = null;
   S.editing = null;
+  if (route().view === 'admin' && S.adminOk) refresh({ quiet: true });
   render();
   window.scrollTo(0, 0);
 });

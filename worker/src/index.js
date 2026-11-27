@@ -6,7 +6,7 @@ import { amazonSearch, searchConfigured, SearchUnavailable } from './amazon.js';
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Key',
+  'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Key, X-Person-Token',
   'Access-Control-Max-Age': '86400',
 };
 
@@ -63,6 +63,45 @@ async function requireAdmin(request, env) {
   if (!crypto.subtle.timingSafeEqual(a, b)) fail(401, 'Falsches Admin-Passwort.');
 }
 
+// ---------- Personen-Codes ----------
+
+const PIN_MAX_FAILS = 5;
+const PIN_LOCK_MS = 5 * 60 * 1000;
+const isPin = (p) => /^\d{4}$/.test(String(p || ''));
+const randomPin = () => String(crypto.getRandomValues(new Uint32Array(1))[0] % 10000).padStart(4, '0');
+
+// Das Token hängt am Code: Ändert Eric den Code, sind alle alten Anmeldungen ungültig.
+async function signPerson(env, id, pin) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(`wunschliste|${env.ADMIN_PASSWORD || 'ohne-passwort'}`),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${id}:${pin}`));
+  return btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/[+/=]/g, (c) => ({ '+': '-', '/': '_', '=': '' }[c])).slice(0, 32);
+}
+
+// Wer ist angemeldet? Liefert die Personen-ID oder null.
+async function viewerOf(request, env) {
+  const t = request.headers.get('X-Person-Token') || '';
+  const [idStr, sig] = t.split('.');
+  const id = intOrNull(idStr);
+  if (!id || !sig) return null;
+  const p = await env.DB.prepare('SELECT id, pin FROM people WHERE id = ?').bind(id).first();
+  if (!p || !isPin(p.pin)) return null;
+  const expected = await signPerson(env, p.id, p.pin);
+  const [a, b] = await Promise.all([sha256(sig), sha256(expected)]);
+  return crypto.subtle.timingSafeEqual(a, b) ? p.id : null;
+}
+
+async function requireViewer(request, env) {
+  const v = await viewerOf(request, env);
+  if (!v) fail(401, 'Bitte melde dich zuerst mit deinem Code an.');
+  return v;
+}
+
 // ---------- Datenzugriff ----------
 
 const ROUND_COLS = 'id, family_id, title, year, budget_min, budget_max, exchange_date, is_current';
@@ -95,11 +134,12 @@ async function isMember(env, roundId, personId) {
 }
 
 async function state(env, { familyId, roundId, viewerId }) {
+  // Ohne Anmeldung gibt es nur Namen, keine Wunschzettel (und damit auch keine Kauf-Markierungen)
   const features = { amazonSearch: searchConfigured(env), test: Boolean(env.TEST_MODE) };
   const families = (await env.DB.prepare('SELECT id, name FROM families ORDER BY sort, id').all()).results;
   const family = families.find((f) => f.id === familyId) || (families.length === 1 ? families[0] : null);
   if (!family) {
-    return { families, family: null, rounds: [], round: null, people: [], family_people: [], members: [], items: [], features };
+    return { viewer: viewerId || null, families, family: null, rounds: [], round: null, people: [], family_people: [], members: [], items: [], features };
   }
   const rounds = (
     await env.DB.prepare(`SELECT ${ROUND_COLS} FROM rounds WHERE family_id = ? ORDER BY year DESC, id DESC`).bind(family.id).all()
@@ -115,9 +155,10 @@ async function state(env, { familyId, roundId, viewerId }) {
     ).bind(family.id, rid),
     env.DB.prepare('SELECT person_id FROM family_members WHERE family_id = ?').bind(family.id),
     env.DB.prepare('SELECT person_id FROM round_members WHERE round_id = ?').bind(rid),
-    env.DB.prepare('SELECT * FROM items WHERE round_id = ? ORDER BY favorite DESC, created_at DESC, id DESC').bind(rid),
+    env.DB.prepare('SELECT * FROM items WHERE round_id = ? ORDER BY favorite DESC, created_at DESC, id DESC').bind(viewerId ? rid : 0),
   ]);
   return {
+    viewer: viewerId || null,
     families,
     family,
     rounds,
@@ -127,7 +168,7 @@ async function state(env, { familyId, roundId, viewerId }) {
     members: members.results.map((m) => m.person_id),
     // Kauf-Markierungen auf dem eigenen Wunschzettel nie an die beschenkte Person schicken
     items: items.results.map((it) =>
-      viewerId && it.person_id === viewerId ? { ...it, purchased_by: null, purchased_at: null } : it,
+      it.person_id === viewerId ? { ...it, purchased_by: null, purchased_at: null } : it,
     ),
     features,
   };
@@ -156,7 +197,46 @@ async function route(request, env, url) {
 
   // Alles auf einmal laden
   if (m === 'GET' && a === 'state') {
-    return json(await state(env, { familyId: q('family'), roundId: q('round'), viewerId: q('viewer') }));
+    return json(await state(env, { familyId: q('family'), roundId: q('round'), viewerId: await viewerOf(request, env) }));
+  }
+
+  // Mit Code anmelden
+  if (m === 'POST' && a === 'login') {
+    const d = await body(request);
+    const id = intOrNull(d.person_id);
+    const p = id && (await env.DB.prepare('SELECT id, name, pin, pin_fails, pin_locked_until FROM people WHERE id = ?').bind(id).first());
+    if (!p) fail(404, 'Diese Person gibt es nicht.');
+    const now = Date.now();
+    if (p.pin_locked_until && p.pin_locked_until > now) {
+      const min = Math.ceil((p.pin_locked_until - now) / 60000);
+      fail(429, `Zu oft der falsche Code. Bitte in ${min} ${min === 1 ? 'Minute' : 'Minuten'} noch mal versuchen.`);
+    }
+    if (!isPin(p.pin) || String(d.pin || '') !== p.pin) {
+      const fails = (p.pin_fails || 0) + 1;
+      const lock = fails >= PIN_MAX_FAILS;
+      await env.DB.prepare('UPDATE people SET pin_fails = ?, pin_locked_until = ? WHERE id = ?')
+        .bind(lock ? 0 : fails, lock ? now + PIN_LOCK_MS : null, p.id)
+        .run();
+      fail(403, lock ? 'Zu oft der falsche Code. Bitte in 5 Minuten noch mal versuchen.' : 'Der Code stimmt nicht.');
+    }
+    await env.DB.prepare('UPDATE people SET pin_fails = 0, pin_locked_until = NULL WHERE id = ?').bind(p.id).run();
+    return json({ token: `${p.id}.${await signPerson(env, p.id, p.pin)}`, person_id: p.id });
+  }
+
+  // "Code vergessen": zeigt den Code (Eric sieht in der Verwaltung, wer das benutzt hat)
+  if (m === 'POST' && a === 'people' && b && c === 'forgot') {
+    const p = await env.DB.prepare(
+      "UPDATE people SET pin_reveals = pin_reveals + 1, pin_revealed_at = datetime('now'), pin_fails = 0, pin_locked_until = NULL WHERE id = ? RETURNING pin",
+    )
+      .bind(intOrNull(b))
+      .first();
+    if (!p) fail(404, 'Diese Person gibt es nicht.');
+    return json({ pin: p.pin });
+  }
+
+  // Vorschau und Suche verbrauchen Kontingent: nur für Angemeldete
+  if (m === 'GET' && (a === 'preview' || a === 'search') && !(await viewerOf(request, env))) {
+    await requireAdmin(request, env).catch(() => fail(401, 'Bitte melde dich zuerst mit deinem Code an.'));
   }
 
   // Link-Vorschau
@@ -186,8 +266,8 @@ async function route(request, env, url) {
     const d = await body(request);
     const round = await loadRound(env, intOrNull(d.round_id));
     assertEditable(round);
-    const personId = intOrNull(d.person_id);
-    if (!(await isMember(env, round.id, personId))) fail(400, 'Diese Person macht in dieser Gruppe nicht mit.');
+    const personId = await requireViewer(request, env);
+    if (!(await isMember(env, round.id, personId))) fail(400, 'Du machst in dieser Gruppe nicht mit.');
 
     let fields = {
       url: safeUrl(d.url),
@@ -220,10 +300,8 @@ async function route(request, env, url) {
   if (a === 'items' && b && c === 'purchase' && (m === 'POST' || m === 'DELETE')) {
     const item = await getItem(env, intOrNull(b));
     assertEditable(item);
+    const buyer = await requireViewer(request, env);
     if (m === 'POST') {
-      const d = await body(request);
-      const buyer = intOrNull(d.person_id);
-      if (!buyer) fail(400, 'Bitte zuerst oben deinen Namen wählen.');
       if (buyer === item.person_id) fail(400, 'Deine eigenen Wünsche kannst du nicht als gekauft markieren.');
       if (!(await isMember(env, item.round_id, buyer))) fail(400, 'Du machst in dieser Gruppe nicht mit.');
       if (item.purchased_by && item.purchased_by !== buyer) {
@@ -232,6 +310,7 @@ async function route(request, env, url) {
       }
       await env.DB.prepare("UPDATE items SET purchased_by = ?, purchased_at = datetime('now') WHERE id = ?").bind(buyer, item.id).run();
     } else {
+      if (item.purchased_by && item.purchased_by !== buyer) fail(403, 'Nur wer es gekauft hat, kann die Markierung entfernen.');
       await env.DB.prepare('UPDATE items SET purchased_by = NULL, purchased_at = NULL WHERE id = ?').bind(item.id).run();
     }
     return json({ ok: true });
@@ -242,6 +321,7 @@ async function route(request, env, url) {
     const id = intOrNull(b);
     const item = await getItem(env, id);
     assertEditable(item);
+    if ((await requireViewer(request, env)) !== item.person_id) fail(403, 'Das ist nicht dein Wunschzettel.');
 
     if (m === 'DELETE' && !c) {
       await env.DB.prepare('DELETE FROM items WHERE id = ?').bind(id).run();
@@ -282,6 +362,7 @@ async function route(request, env, url) {
 
   // "Gut zu wissen" einer Person (darf jede*r für sich selbst pflegen)
   if (m === 'PATCH' && a === 'people' && b && !c) {
+    if ((await requireViewer(request, env)) !== intOrNull(b)) fail(403, 'Das kannst du nur für dich selbst ändern.');
     const d = await body(request);
     const row = await env.DB.prepare('UPDATE people SET about = ? WHERE id = ? RETURNING id, name, color, about')
       .bind(str(d.about, 2000), intOrNull(b))
@@ -295,6 +376,17 @@ async function route(request, env, url) {
     await requireAdmin(request, env);
 
     if (m === 'POST' && b === 'check') return json({ ok: true, test: Boolean(env.TEST_MODE) });
+
+    // Codes einer Familie (nur für Eric)
+    if (m === 'GET' && b === 'pins') {
+      const rows = await env.DB.prepare(
+        `SELECT id, pin, pin_reveals, pin_revealed_at FROM people
+         WHERE id IN (SELECT person_id FROM family_members WHERE family_id = ?)`,
+      )
+        .bind(q('family') || 0)
+        .all();
+      return json(rows.results);
+    }
 
     // Familien
     if (b === 'families') {
@@ -353,8 +445,8 @@ async function route(request, env, url) {
         let person = await env.DB.prepare('SELECT id, name, color, about FROM people WHERE name = ? COLLATE NOCASE').bind(name).first();
         const existed = Boolean(person);
         if (!person) {
-          person = await env.DB.prepare('INSERT INTO people (name, color) VALUES (?, ?) RETURNING id, name, color, about')
-            .bind(name, color)
+          person = await env.DB.prepare('INSERT INTO people (name, color, pin) VALUES (?, ?, ?) RETURNING id, name, color, about')
+            .bind(name, color, randomPin())
             .first();
         }
         const stmts = [
@@ -379,10 +471,17 @@ async function route(request, env, url) {
         const name = 'name' in d ? str(d.name, 40) : cur.name;
         if (!name) fail(400, 'Der Name darf nicht leer sein.');
         const color = isColor(d.color) ? d.color : cur.color;
+        let pin = cur.pin;
+        if ('pin' in d) {
+          if (!isPin(d.pin)) fail(400, 'Der Code muss aus genau 4 Ziffern bestehen.');
+          pin = String(d.pin);
+        }
         try {
           return json(
-            await env.DB.prepare('UPDATE people SET name = ?, color = ? WHERE id = ? RETURNING id, name, color, about')
-              .bind(name, color, id)
+            await env.DB.prepare(
+              'UPDATE people SET name = ?, color = ?, pin = ?, pin_fails = 0, pin_locked_until = NULL WHERE id = ? RETURNING id, name, color, about, pin',
+            )
+              .bind(name, color, pin, id)
               .first(),
           );
         } catch {
