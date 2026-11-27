@@ -1821,6 +1821,22 @@ function tourSteps() {
       { sel: '.helper', title: 'Danach geht es weiter', text: 'Danach tippst du auf deinen Namen und gibst deinen Code ein. Drück dann noch einmal auf mich, dann zeige ich dir den Rest.' },
     ];
   }
+  if (S.pinFor) {
+    const p = person(S.pinFor);
+    if (p && !p.has_pin) {
+      return [
+        { sel: '.pin__form', title: 'Dein eigener Code', text: 'Denk dir 4 Ziffern aus und tipp sie ein. Danach gibst du sie zur Sicherheit noch einmal ein. Mit dem Code kann niemand sonst deinen Wunschzettel öffnen.' },
+        { sel: '.pin__more', title: 'Falscher Name?', text: 'Hast du aus Versehen auf einen anderen Namen getippt, geht es mit „Ich bin jemand anderes“ zurück.' },
+      ];
+    }
+    return [
+      { sel: '.pin__form', title: 'Dein Code', text: 'Tipp hier die 4 Ziffern ein, die du dir beim ersten Mal ausgedacht hast.' },
+      { sel: '.pin__more', title: 'Code vergessen?', text: 'Tipp unten auf „Code vergessen?“ und beantworte die Fragen. Dann zeige ich dir deinen Code.' },
+    ];
+  }
+  if (needGroupChoice()) {
+    return [{ sel: '.choose__list', title: 'Welche Liste?', text: 'In deiner Familie gibt es gerade mehrere Listen. Tipp auf die, zu der du willst.' }];
+  }
   if (!S.me) {
     return [
       { sel: '.garland', title: 'Wer bist du?', text: `Jede${isXmas() ? ' Kugel' : 'r Kreis'} ist eine Person aus der Familie. Tipp auf deinen Namen und gib deinen Code ein.` },
@@ -1837,10 +1853,12 @@ function tourSteps() {
       text: 'Dann erscheinen Bilder von passenden Artikeln. Gefällt dir einer, tippst du darunter auf diesen Knopf:',
       demo: '<span class="tour__demo">Auf meine Liste</span><span class="tour__demo-hint">Fertig! Mehr ist es nicht.</span>',
     },
-    { sel: '.add', title: 'Etwas aus einem anderen Laden?', text: 'Kopier im Laden den Link. Dann tippst du hier auf „Kopierten Link einfügen“. Du kannst auch eine Idee ohne Link aufschreiben.' },
+    { sel: '.add', title: 'Etwas aus einem anderen Laden?', text: 'Kopier im Laden den Link. Dann tippst du hier auf „Kopierten Link einfügen“, oder du fügst ihn ins Feld ein und tippst auf „Hinzufügen“. Du kannst auch eine Idee ohne Link aufschreiben.' },
     { sel: '#my-list', title: 'Dein Wunschzettel', text: 'Hier steht alles, was du dir wünschst. Mit dem Stern ☆ markierst du deinen größten Wunsch. Mit „Löschen“ nimmst du etwas wieder herunter.' },
     { sel: '.about', title: 'Gut zu wissen', text: 'Schreib hier Größen und Vorlieben auf, zum Beispiel deine Schuhgröße. Danach auf „Speichern“ tippen.' },
     { sel: '.garland', title: 'Geschenk für jemand anderen', text: `Tipp oben auf ${isXmas() ? 'die Kugel' : 'den Namen'} der Person, die du beschenkst. Hast du etwas von ihrem Zettel gekauft, tipp dort auf „Hab ich gekauft“. Die Person sieht das nicht, alle anderen schon. So kauft niemand doppelt.` },
+    { sel: '.ctx', title: 'Andere Liste', text: 'Willst du zu einer anderen Liste, zum Beispiel der anderen Familie? Dann tipp oben auf den Familiennamen.' },
+    { sel: '.whoami', title: 'Abmelden', text: 'Mit „Wechseln“ meldest du dich ab, zum Beispiel wenn jemand anderes dein Handy benutzt. Danach brauchst du wieder deinen Code.' },
     { sel: '.helper', title: 'Das war’s!', text: `Wenn du wieder Hilfe brauchst, drück einfach auf mich. ${isXmas() ? 'Frohe Weihnachten!' : 'Viel Spaß beim Wünschen!'}` },
   ];
 }
