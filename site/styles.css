@@ -1065,3 +1065,8 @@ body.theme-plain {
   .topbar__left { gap: 7px; }
   .ctx { font-size: 0.85rem; padding: 3px 8px 3px 10px; }
 }
+.pin__steps { display: flex; gap: 8px; margin-top: 14px; }
+.pin__steps span { width: 9px; height: 9px; border-radius: 50%; background: var(--mist-strong); }
+.pin__steps span.is-on { background: var(--fir); }
+.pin-status { grid-column: 1 / -1; font-size: 0.85rem; color: var(--fir-soft); }
+.pin-status .linklike { font-size: inherit; }

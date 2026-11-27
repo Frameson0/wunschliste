@@ -21,6 +21,7 @@ const S = {
   me: null,         // angemeldete Person, wenn sie in der angezeigten Gruppe mitmacht
   pinFor: null,     // Person, deren Code gerade abgefragt wird
   forgot: 0,        // Schritt beim "Code vergessen"
+  pinFirst: '',     // beim ersten Festlegen: der zuerst eingegebene Code
   pins: [],         // Codes für die Verwaltung
   // In der Testversion gilt auch das Passwort, mit dem du auf der Live-Seite angemeldet bist
   adminKey: store.get(KEYS.admin) || (TEST ? store.get('wichteln.admin') || '' : ''),
@@ -422,6 +423,7 @@ function viewNoGroup() {
 function viewPin() {
   const p = person(S.pinFor);
   if (!p) { S.pinFor = null; return viewPicker(); }
+  if (!p.has_pin) return viewPinSetup(p);
   return `
   ${topbar()}
   <main id="main" class="choose pin" style="--c:${esc(p.color)}">
@@ -439,7 +441,35 @@ function viewPin() {
     <div class="pin__more">
       <button class="btn btn--ghost" type="button" data-act="pin-back">Ich bin jemand anderes</button>
       ${S.forgot < 4 ? `<button class="linklike pin__forgot ${S.forgot ? 'is-asking' : ''}" type="button" data-act="forgot">${esc(forgotLabel(p))}</button>` : ''}
-      <p class="hint" id="pin-hint">Den Code bekommst du von Eric. Wer „Code vergessen“ benutzt, sieht Eric in der Verwaltung.</p>
+      <p class="hint" id="pin-hint">Das ist der Code, den du dir beim ersten Mal ausgedacht hast. Wer „Code vergessen“ benutzt, sieht Eric in der Verwaltung.</p>
+    </div>
+  </main>
+  ${footer()}`;
+}
+
+function viewPinSetup(p) {
+  const again = Boolean(S.pinFirst);
+  return `
+  ${topbar()}
+  <main id="main" class="choose pin" style="--c:${esc(p.color)}">
+    <span class="pin__ball ${isLight(p.color) ? 'is-light' : ''}" aria-hidden="true">${esc(p.name.slice(0, 1).toUpperCase())}</span>
+    <div class="choose__text">
+      <h1>${again ? 'Noch einmal, bitte' : `Hallo ${esc(p.name)}!`}</h1>
+      <p>${
+        again
+          ? 'Gib deinen neuen Code zur Sicherheit noch einmal ein.'
+          : 'Du bist zum ersten Mal hier. Denk dir einen 4-stelligen Code aus. Damit kann niemand sonst deinen Wunschzettel öffnen.'
+      }</p>
+    </div>
+    <form class="pin__form" data-form="pin-login" autocomplete="off">
+      <label class="sr" for="pin">${again ? 'Code wiederholen' : `Neuer Code für ${esc(p.name)}`}</label>
+      <input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="new-password" enterkeyhint="go" placeholder="····">
+      <button class="btn btn--primary pin__go" type="submit">${again ? 'Code speichern' : 'Weiter'}</button>
+    </form>
+    <p class="pin__steps" aria-hidden="true"><span class="${again ? '' : 'is-on'}"></span><span class="${again ? 'is-on' : ''}"></span></p>
+    <div class="pin__more">
+      <button class="btn btn--ghost" type="button" data-act="pin-back">Ich bin jemand anderes</button>
+      <p class="hint">Merk dir den Code gut, zum Beispiel ein Geburtstag oder eine Hausnummer. Vergessen ist aber auch kein Drama.</p>
     </div>
   </main>
   ${footer()}`;
@@ -955,8 +985,9 @@ function viewAdmin() {
             (p) => `
           <li><form data-form="admin-person" data-id="${p.id}" class="person-row person-row--pin">
             <input name="name" value="${esc(p.name)}" maxlength="40" aria-label="Name">
-            <label class="pin-field"><span>Code</span><input name="pin" value="${esc(pinOf(p.id).pin || '')}" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" aria-label="Code von ${esc(p.name)}"></label>
+            <label class="pin-field"><span>Code</span><input name="pin" value="${esc(pinOf(p.id).pin || '')}" placeholder="noch frei" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" aria-label="Code von ${esc(p.name)}"></label>
             ${colorSelect(`color-${p.id}`, p.color)}
+            <span class="pin-status">${pinOf(p.id).pin ? `Code festgelegt${pinOf(p.id).pin_set_at ? ` am ${esc(fmtDay(pinOf(p.id).pin_set_at))}` : ''} · <button class="linklike" type="button" data-act="admin-reset-pin" data-id="${p.id}">Zurücksetzen</button>` : 'Hat noch keinen Code, legt ihn beim ersten Antippen selbst fest'}</span>
             ${pinOf(p.id).pin_reveals ? `<span class="pin-note">Hat „Code vergessen“ ${pinOf(p.id).pin_reveals}× benutzt, zuletzt ${esc(fmtDay(pinOf(p.id).pin_revealed_at))}</span>` : ''}
             <span class="person-row__actions">
               <button class="btn btn--ghost btn--small" type="submit">Speichern</button>
@@ -1121,11 +1152,17 @@ const actions = {
     if (id === S.viewer) return afterLogin();
     S.pinFor = id;
     S.forgot = 0;
+    S.pinFirst = '';
     render();
     const inp = $('#pin');
     if (inp) inp.focus();
   },
-  'pin-back'() { S.pinFor = null; S.forgot = 0; render(); },
+  'pin-back'() { S.pinFor = null; S.forgot = 0; S.pinFirst = ''; render(); },
+  async 'admin-reset-pin'(el) {
+    const p = person(parseInt(el.dataset.id, 10));
+    if (!confirm(`Code von ${p.name} zurücksetzen? ${p.name} legt beim nächsten Antippen einen neuen fest. Auf allen Geräten muss ${p.name} sich dann neu anmelden.`)) return;
+    await adminCall(`/api/admin/people/${p.id}`, { method: 'PATCH', body: { reset_pin: true } }, `Code von ${p.name} ist zurückgesetzt`);
+  },
   async forgot() {
     const p = person(S.pinFor);
     if (S.forgot < 3) {
@@ -1324,6 +1361,7 @@ function forgotLabel(p) {
 function afterLogin() {
   S.pinFor = null;
   S.forgot = 0;
+  S.pinFirst = '';
   if (sessionStorage.getItem(SHARE_KEY)) return processShare();
   if (location.hash !== `#/p/${S.me}`) location.hash = `#/p/${S.me}`;
   else render();
@@ -1333,14 +1371,41 @@ const forms = {
   async 'pin-login'(f) {
     const pin = f.pin.value.replace(/\D/g, '');
     if (pin.length !== 4) return f.pin.focus();
+    const setup = !person(S.pinFor).has_pin;
+    if (setup && !S.pinFirst) {
+      // Erst einmal eingeben, dann zur Sicherheit wiederholen
+      S.pinFirst = pin;
+      render();
+      $('#pin').focus();
+      return;
+    }
+    if (setup && pin !== S.pinFirst) {
+      S.pinFirst = '';
+      render();
+      const nf = $('[data-form="pin-login"]');
+      nf.classList.add('is-wrong');
+      toast('Die beiden Codes waren nicht gleich. Bitte noch mal von vorn.', 'is-error');
+      $('#pin').focus();
+      return;
+    }
     const btn = f.querySelector('[type="submit"]');
     btn.disabled = true;
     try {
-      const res = await api('/api/login', { method: 'POST', body: { person_id: S.pinFor, pin } });
+      const body = setup ? { person_id: S.pinFor, new_pin: pin } : { person_id: S.pinFor, pin };
+      const res = await api('/api/login', { method: 'POST', body });
       setToken(res.token);
       await load();
+      if (res.created) toast('Dein Code ist gespeichert. Merk ihn dir gut!');
       afterLogin();
     } catch (e) {
+      if (setup || e.status === 409) {
+        // Code wurde inzwischen festgelegt (oder zurückgesetzt): Ansicht neu laden
+        S.pinFirst = '';
+        await load().catch(() => {});
+        render();
+        toast(e.message, 'is-error');
+        return;
+      }
       btn.disabled = false;
       f.pin.value = '';
       f.classList.remove('is-wrong'); void f.offsetWidth; f.classList.add('is-wrong');
@@ -1418,7 +1483,8 @@ const forms = {
     const id = f.dataset.id;
     const color = (f.querySelector(`[name="color-${id}"]:checked`) || {}).value;
     const body = { name: f.name.value, color };
-    if (f.pin.value) body.pin = f.pin.value.trim();
+    const pin = f.pin.value.trim();
+    if (pin && pin !== (pinOf(parseInt(id, 10)).pin || '')) body.pin = pin;
     await adminCall(`/api/admin/people/${id}`, { method: 'PATCH', body }, 'Gespeichert');
   },
   async 'admin-add-person'(f) {

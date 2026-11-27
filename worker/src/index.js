@@ -68,7 +68,6 @@ async function requireAdmin(request, env) {
 const PIN_MAX_FAILS = 5;
 const PIN_LOCK_MS = 5 * 60 * 1000;
 const isPin = (p) => /^\d{4}$/.test(String(p || ''));
-const randomPin = () => String(crypto.getRandomValues(new Uint32Array(1))[0] % 10000).padStart(4, '0');
 
 // Das Token hängt am Code: Ändert Eric den Code, sind alle alten Anmeldungen ungültig.
 async function signPerson(env, id, pin) {
@@ -148,7 +147,7 @@ async function state(env, { familyId, roundId, viewerId }) {
   const rid = round ? round.id : 0;
   const [people, familyPeople, members, items] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT id, name, color, about FROM people
+      `SELECT id, name, color, about, (pin IS NOT NULL) AS has_pin FROM people
        WHERE id IN (SELECT person_id FROM family_members WHERE family_id = ?)
           OR id IN (SELECT person_id FROM round_members WHERE round_id = ?)
        ORDER BY id`,
@@ -206,12 +205,23 @@ async function route(request, env, url) {
     const id = intOrNull(d.person_id);
     const p = id && (await env.DB.prepare('SELECT id, name, pin, pin_fails, pin_locked_until FROM people WHERE id = ?').bind(id).first());
     if (!p) fail(404, 'Diese Person gibt es nicht.');
+    // Erstes Mal: Die Person legt ihren Code selbst fest
+    if (!isPin(p.pin)) {
+      if (!isPin(d.new_pin)) throw Object.assign(new HttpError(409, `${p.name} hat noch keinen Code.`), { extra: { needs_setup: true } });
+      const set = await env.DB.prepare(
+        "UPDATE people SET pin = ?, pin_set_at = datetime('now'), pin_fails = 0, pin_locked_until = NULL WHERE id = ? AND pin IS NULL RETURNING id",
+      )
+        .bind(String(d.new_pin), p.id)
+        .first();
+      if (!set) fail(409, `${p.name} hat gerade schon einen Code festgelegt.`);
+      return json({ token: `${p.id}.${await signPerson(env, p.id, String(d.new_pin))}`, person_id: p.id, created: true });
+    }
     const now = Date.now();
     if (p.pin_locked_until && p.pin_locked_until > now) {
       const min = Math.ceil((p.pin_locked_until - now) / 60000);
       fail(429, `Zu oft der falsche Code. Bitte in ${min} ${min === 1 ? 'Minute' : 'Minuten'} noch mal versuchen.`);
     }
-    if (!isPin(p.pin) || String(d.pin || '') !== p.pin) {
+    if (String(d.pin || '') !== p.pin) {
       const fails = (p.pin_fails || 0) + 1;
       const lock = fails >= PIN_MAX_FAILS;
       await env.DB.prepare('UPDATE people SET pin_fails = ?, pin_locked_until = ? WHERE id = ?')
@@ -226,11 +236,11 @@ async function route(request, env, url) {
   // "Code vergessen": zeigt den Code (Eric sieht in der Verwaltung, wer das benutzt hat)
   if (m === 'POST' && a === 'people' && b && c === 'forgot') {
     const p = await env.DB.prepare(
-      "UPDATE people SET pin_reveals = pin_reveals + 1, pin_revealed_at = datetime('now'), pin_fails = 0, pin_locked_until = NULL WHERE id = ? RETURNING pin",
+      "UPDATE people SET pin_reveals = pin_reveals + 1, pin_revealed_at = datetime('now'), pin_fails = 0, pin_locked_until = NULL WHERE id = ? AND pin IS NOT NULL RETURNING pin",
     )
       .bind(intOrNull(b))
       .first();
-    if (!p) fail(404, 'Diese Person gibt es nicht.');
+    if (!p) fail(404, 'Für diese Person gibt es noch keinen Code. Einfach einen neuen festlegen.');
     return json({ pin: p.pin });
   }
 
@@ -380,7 +390,7 @@ async function route(request, env, url) {
     // Codes einer Familie (nur für Eric)
     if (m === 'GET' && b === 'pins') {
       const rows = await env.DB.prepare(
-        `SELECT id, pin, pin_reveals, pin_revealed_at FROM people
+        `SELECT id, pin, pin_set_at, pin_reveals, pin_revealed_at FROM people
          WHERE id IN (SELECT person_id FROM family_members WHERE family_id = ?)`,
       )
         .bind(q('family') || 0)
@@ -445,8 +455,8 @@ async function route(request, env, url) {
         let person = await env.DB.prepare('SELECT id, name, color, about FROM people WHERE name = ? COLLATE NOCASE').bind(name).first();
         const existed = Boolean(person);
         if (!person) {
-          person = await env.DB.prepare('INSERT INTO people (name, color, pin) VALUES (?, ?, ?) RETURNING id, name, color, about')
-            .bind(name, color, randomPin())
+          person = await env.DB.prepare('INSERT INTO people (name, color) VALUES (?, ?) RETURNING id, name, color, about')
+            .bind(name, color)
             .first();
         }
         const stmts = [
@@ -471,17 +481,23 @@ async function route(request, env, url) {
         const name = 'name' in d ? str(d.name, 40) : cur.name;
         if (!name) fail(400, 'Der Name darf nicht leer sein.');
         const color = isColor(d.color) ? d.color : cur.color;
+        // pin: neuer Code; reset_pin: Code löschen, die Person legt beim nächsten Mal einen neuen fest
         let pin = cur.pin;
-        if ('pin' in d) {
+        let pinSetAt = cur.pin_set_at;
+        if (d.reset_pin) {
+          pin = null;
+          pinSetAt = null;
+        } else if ('pin' in d && String(d.pin) !== String(cur.pin)) {
           if (!isPin(d.pin)) fail(400, 'Der Code muss aus genau 4 Ziffern bestehen.');
           pin = String(d.pin);
+          pinSetAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
         }
         try {
           return json(
             await env.DB.prepare(
-              'UPDATE people SET name = ?, color = ?, pin = ?, pin_fails = 0, pin_locked_until = NULL WHERE id = ? RETURNING id, name, color, about, pin',
+              'UPDATE people SET name = ?, color = ?, pin = ?, pin_set_at = ?, pin_fails = 0, pin_locked_until = NULL WHERE id = ? RETURNING id, name, color, about, pin',
             )
-              .bind(name, color, pin, id)
+              .bind(name, color, pin, pinSetAt, id)
               .first(),
           );
         } catch {
