@@ -28,12 +28,12 @@ jobs:
           - label: live
             ref: main
             env_flag: ''
-            script: wichteln-api
+            script: wunschliste-api
             db: wichteln
           - label: test
             ref: test
             env_flag: '--env test'
-            script: wichteln-api-test
+            script: wunschliste-api-test
             db: wichteln-test
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -137,19 +137,19 @@ jobs:
         env:
           API_URL: ${{ vars.API_URL }}
         run: |
-          url="${API_URL:-https://wichteln-api.jeric-kebel.workers.dev}"
-          test_url="${url/wichteln-api./wichteln-api-test.}"
+          url="${API_URL:-https://wunschliste-api.jeric-kebel.workers.dev}"
+          test_url="${url/wunschliste-api./wunschliste-api-test.}"
           mkdir -p _site
           cp -r live/site/. _site/
-          echo "window.WICHTEL_API = '$url';" > _site/config.js
+          echo "window.WUNSCHLISTE_API = '$url';" > _site/config.js
           v="$(git -C live rev-parse --short HEAD)"
           sed -i "s/?v=dev/?v=$v/g" _site/index.html
-          sed -i "s/wichteln-v2/wichteln-$v/" _site/sw.js
+          sed -i "s/wunschliste-v2/wunschliste-$v/" _site/sw.js
 
           mkdir -p _site/test
           cp -r test/site/. _site/test/
           rm -f _site/test/sw.js
-          printf "window.WICHTEL_API = '%s';\nwindow.WICHTEL_TEST = true;\n" "$test_url" > _site/test/config.js
+          printf "window.WUNSCHLISTE_API = '%s';\nwindow.WUNSCHLISTE_TEST = true;\n" "$test_url" > _site/test/config.js
           tv="t$(git -C test rev-parse --short HEAD)"
           sed -i "s/?v=dev/?v=$tv/g" _site/test/index.html
           # Testversion nicht als App installierbar machen und nicht in Suchmaschinen

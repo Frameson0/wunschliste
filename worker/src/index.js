@@ -611,7 +611,7 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
     const url = new URL(request.url);
     if (url.pathname === '/' || url.pathname === '') {
-      return json({ ok: true, hinweis: 'Das ist die Wichtel-API. Die Seite selbst liegt auf GitHub Pages.', test: Boolean(env.TEST_MODE) });
+      return json({ ok: true, hinweis: 'Das ist die Wunschlisten-API. Die Seite selbst liegt auf GitHub Pages.', test: Boolean(env.TEST_MODE) });
     }
     try {
       return await route(request, env, url);

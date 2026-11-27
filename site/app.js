@@ -1,10 +1,22 @@
 // Wunschliste – Wunschzettel für die Familie
-// Reines JavaScript ohne Build-Schritt. Daten kommen vom Cloudflare Worker (window.WICHTEL_API).
+// Reines JavaScript ohne Build-Schritt. Daten kommen vom Cloudflare Worker (window.WUNSCHLISTE_API).
 
-const API = String(window.WICHTEL_API || '').replace(/\/+$/, '');
+const API = String(window.WUNSCHLISTE_API || '').replace(/\/+$/, '');
 // Die Testversion läuft unter /test/ auf derselben Adresse und bekommt eigene Speicher-Schlüssel
-const TEST = Boolean(window.WICHTEL_TEST);
-const PFX = TEST ? 'wichteln.test.' : 'wichteln.';
+const TEST = Boolean(window.WUNSCHLISTE_TEST);
+const PFX = TEST ? 'wunschliste.test.' : 'wunschliste.';
+
+// Die Speicher-Schlüssel hießen anfangs "wichteln.*": einmalig übernehmen, damit niemand neu anmelden muss
+try {
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith('wichteln.')) {
+      const nk = `wunschliste.${k.slice(9)}`;
+      if (localStorage.getItem(nk) == null) localStorage.setItem(nk, localStorage.getItem(k));
+      localStorage.removeItem(k);
+    }
+  }
+} catch { /* privates Fenster */ }
 const KEYS = { token: `${PFX}token`, admin: `${PFX}admin`, family: `${PFX}family`, group: (fid) => `${PFX}group.${fid}` };
 
 const store = {
@@ -24,7 +36,7 @@ const S = {
   pinFirst: '',     // beim ersten Festlegen: der zuerst eingegebene Code
   pins: [],         // Codes für die Verwaltung
   // In der Testversion gilt auch das Passwort, mit dem du auf der Live-Seite angemeldet bist
-  adminKey: store.get(KEYS.admin) || (TEST ? store.get('wichteln.admin') || '' : ''),
+  adminKey: store.get(KEYS.admin) || (TEST ? store.get('wunschliste.admin') || '' : ''),
   needAdmin: false,
   adminOk: false,
   draft: null,      // neue Idee in Arbeit
@@ -1758,7 +1770,7 @@ async function addFromSheet(asin) {
 
 // ---------- Teilen aus anderen Apps ----------
 
-const SHARE_KEY = 'wichteln.share';
+const SHARE_KEY = 'wunschliste.share';
 
 function titleFromSharedText(text, url) {
   return String(text || '')

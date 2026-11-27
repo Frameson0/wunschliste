@@ -1,6 +1,6 @@
 -- Familien und Gruppen
 -- Eine Familie (z. B. "Goldenstein", "Kebel") hat Personen und beliebig viele Gruppen.
--- Eine Gruppe ist eine Runde (Tabelle rounds) mit Name und Jahr, z. B. "Wichteln Kebel 26".
+-- Eine Gruppe ist eine Runde (Tabelle rounds) mit Name und Jahr, z. B. "Weihnachten Kebel 26".
 -- Personen sind familienübergreifend: Wer in zwei Familien ist, hat ein "Gut zu wissen",
 -- aber pro Gruppe einen eigenen Wunschzettel.
 

@@ -1,8 +1,9 @@
-name = "wichteln-api"
+name = "wunschliste-api"
 main = "src/index.js"
 compatibility_date = "2026-11-01"
 workers_dev = true
 
+# Die D1-Datenbanken heißen aus der Anfangszeit noch "wichteln" (D1 kann nicht umbenannt werden).
 [[d1_databases]]
 binding = "DB"
 database_name = "wichteln"
@@ -11,7 +12,7 @@ migrations_dir = "migrations"
 
 # Testversion: eigener Worker und eigene Datenbank, nur mit Admin-Passwort nutzbar
 [env.test]
-name = "wichteln-api-test"
+name = "wunschliste-api-test"
 workers_dev = true
 vars = { TEST_MODE = "1" }
 

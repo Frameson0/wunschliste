@@ -1,6 +1,6 @@
-// Minimaler Service Worker: macht Wichteln als App installierbar (Teilen-Menü unter Android)
+// Minimaler Service Worker: macht die Wunschliste als App installierbar (Teilen-Menü unter Android)
 // und hält die Seite selbst für schlechten Empfang bereit. API-Aufrufe gehen immer ins Netz.
-const CACHE = 'wichteln-v2';
+const CACHE = 'wunschliste-v2';
 const SHELL = ['./', 'favicon.svg', 'icon-192.png'];
 
 self.addEventListener('install', (e) => {

@@ -7,7 +7,7 @@ CREATE TABLE people (
   created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
--- Eine Runde = ein Wichtel-Jahr
+-- Eine Runde = eine Liste (später "Gruppe")
 CREATE TABLE rounds (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   title         TEXT    NOT NULL,
