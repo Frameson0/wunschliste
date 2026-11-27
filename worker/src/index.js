@@ -6,7 +6,7 @@ import { amazonSearch, searchConfigured, SearchUnavailable } from './amazon.js';
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Key',
+  'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Key, X-Person-Token',
   'Access-Control-Max-Age': '86400',
 };
 
@@ -63,18 +63,53 @@ async function requireAdmin(request, env) {
   if (!crypto.subtle.timingSafeEqual(a, b)) fail(401, 'Falsches Admin-Passwort.');
 }
 
+// ---------- Personen-Codes ----------
+
+const PIN_MAX_FAILS = 5;
+const PIN_LOCK_MS = 5 * 60 * 1000;
+const isPin = (p) => /^\d{4}$/.test(String(p || ''));
+
+// Das Token hängt am Code: Ändert Eric den Code, sind alle alten Anmeldungen ungültig.
+async function signPerson(env, id, pin) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(`wunschliste|${env.ADMIN_PASSWORD || 'ohne-passwort'}`),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${id}:${pin}`));
+  return btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/[+/=]/g, (c) => ({ '+': '-', '/': '_', '=': '' }[c])).slice(0, 32);
+}
+
+// Wer ist angemeldet? Liefert die Personen-ID oder null.
+async function viewerOf(request, env) {
+  const t = request.headers.get('X-Person-Token') || '';
+  const [idStr, sig] = t.split('.');
+  const id = intOrNull(idStr);
+  if (!id || !sig) return null;
+  const p = await env.DB.prepare('SELECT id, pin FROM people WHERE id = ?').bind(id).first();
+  if (!p || !isPin(p.pin)) return null;
+  const expected = await signPerson(env, p.id, p.pin);
+  const [a, b] = await Promise.all([sha256(sig), sha256(expected)]);
+  return crypto.subtle.timingSafeEqual(a, b) ? p.id : null;
+}
+
+async function requireViewer(request, env) {
+  const v = await viewerOf(request, env);
+  if (!v) fail(401, 'Bitte melde dich zuerst mit deinem Code an.');
+  return v;
+}
+
 // ---------- Datenzugriff ----------
 
+const ROUND_COLS = 'id, family_id, title, year, budget_min, budget_max, exchange_date, is_current';
+
 async function loadRound(env, roundId) {
-  if (roundId) {
-    const r = await env.DB.prepare('SELECT * FROM rounds WHERE id = ?').bind(roundId).first();
-    if (!r) fail(404, 'Diese Runde gibt es nicht.');
-    return r;
-  }
-  return (
-    (await env.DB.prepare('SELECT * FROM rounds WHERE is_current = 1 ORDER BY id DESC LIMIT 1').first()) ||
-    (await env.DB.prepare('SELECT * FROM rounds ORDER BY year DESC, id DESC LIMIT 1').first())
-  );
+  if (!roundId) fail(400, 'Es fehlt die Gruppe.');
+  const r = await env.DB.prepare('SELECT * FROM rounds WHERE id = ?').bind(roundId).first();
+  if (!r) fail(404, 'Diese Gruppe gibt es nicht.');
+  return r;
 }
 
 async function getItem(env, id) {
@@ -88,31 +123,57 @@ async function getItem(env, id) {
 }
 
 function assertEditable(round) {
-  if (!round.is_current) fail(403, 'Frühere Jahre sind nur noch zum Anschauen da.');
+  if (!round.is_current) fail(403, 'Diese Gruppe ist archiviert und nur noch zum Anschauen da.');
 }
 
-async function state(env, roundId, viewerId = null) {
-  const round = await loadRound(env, roundId);
-  const [rounds, people, members, items] = await env.DB.batch([
+async function isMember(env, roundId, personId) {
+  return Boolean(
+    await env.DB.prepare('SELECT 1 FROM round_members WHERE round_id = ? AND person_id = ?').bind(roundId, personId).first(),
+  );
+}
+
+async function state(env, { familyId, roundId, viewerId }) {
+  // Ohne Anmeldung gibt es nur Namen, keine Wunschzettel (und damit auch keine Kauf-Markierungen)
+  const features = { amazonSearch: searchConfigured(env), test: Boolean(env.TEST_MODE) };
+  const families = (await env.DB.prepare('SELECT id, name FROM families ORDER BY sort, id').all()).results;
+  const family = families.find((f) => f.id === familyId) || (families.length === 1 ? families[0] : null);
+  if (!family) {
+    // Startseite: alle aktiven Listen, nach Familie sortiert
+    const lists = (
+      await env.DB.prepare(`SELECT ${ROUND_COLS} FROM rounds WHERE is_current = 1 ORDER BY year DESC, exchange_date, id DESC`).all()
+    ).results;
+    return { viewer: viewerId || null, families, lists, family: null, rounds: [], round: null, people: [], family_people: [], members: [], items: [], features };
+  }
+  const rounds = (
+    await env.DB.prepare(`SELECT ${ROUND_COLS} FROM rounds WHERE family_id = ? ORDER BY year DESC, id DESC`).bind(family.id).all()
+  ).results;
+  const round = rounds.find((r) => r.id === roundId) || rounds.find((r) => r.is_current) || rounds[0] || null;
+  const rid = round ? round.id : 0;
+  const [people, familyPeople, members, items] = await env.DB.batch([
     env.DB.prepare(
-      'SELECT id, title, year, budget_min, budget_max, exchange_date, is_current FROM rounds ORDER BY year DESC, id DESC',
-    ),
-    env.DB.prepare('SELECT id, name, color, about FROM people ORDER BY id'),
-    env.DB.prepare('SELECT person_id FROM round_members WHERE round_id = ?').bind(round ? round.id : 0),
-    env.DB.prepare('SELECT * FROM items WHERE round_id = ? ORDER BY favorite DESC, created_at DESC, id DESC').bind(
-      round ? round.id : 0,
-    ),
+      `SELECT id, name, color, about, (pin IS NOT NULL) AS has_pin FROM people
+       WHERE id IN (SELECT person_id FROM family_members WHERE family_id = ?)
+          OR id IN (SELECT person_id FROM round_members WHERE round_id = ?)
+       ORDER BY id`,
+    ).bind(family.id, rid),
+    env.DB.prepare('SELECT person_id FROM family_members WHERE family_id = ?').bind(family.id),
+    env.DB.prepare('SELECT person_id FROM round_members WHERE round_id = ?').bind(rid),
+    env.DB.prepare('SELECT * FROM items WHERE round_id = ? ORDER BY favorite DESC, created_at DESC, id DESC').bind(viewerId ? rid : 0),
   ]);
   return {
-    round: round || null,
-    rounds: rounds.results,
+    viewer: viewerId || null,
+    families,
+    family,
+    rounds,
+    round,
     people: people.results,
+    family_people: familyPeople.results.map((m) => m.person_id),
     members: members.results.map((m) => m.person_id),
     // Kauf-Markierungen auf dem eigenen Wunschzettel nie an die beschenkte Person schicken
     items: items.results.map((it) =>
-      viewerId && it.person_id === viewerId ? { ...it, purchased_by: null, purchased_at: null } : it,
+      it.person_id === viewerId ? { ...it, purchased_by: null, purchased_at: null } : it,
     ),
-    features: { amazonSearch: searchConfigured(env) },
+    features,
   };
 }
 
@@ -123,10 +184,73 @@ async function route(request, env, url) {
   if (parts[0] !== 'api') fail(404, 'Nicht gefunden.');
   const [, a, b, c] = parts;
   const m = request.method;
+  const q = (k) => intOrNull(url.searchParams.get(k));
+
+  // Testversion: alles nur mit Admin-Passwort
+  if (env.TEST_MODE) {
+    try {
+      await requireAdmin(request, env);
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 401) {
+        throw Object.assign(new HttpError(401, 'Die Testversion ist nur mit dem Admin-Passwort zugänglich.'), { extra: { admin_required: true } });
+      }
+      throw e;
+    }
+  }
 
   // Alles auf einmal laden
   if (m === 'GET' && a === 'state') {
-    return json(await state(env, intOrNull(url.searchParams.get('round')), intOrNull(url.searchParams.get('viewer'))));
+    return json(await state(env, { familyId: q('family'), roundId: q('round'), viewerId: await viewerOf(request, env) }));
+  }
+
+  // Mit Code anmelden
+  if (m === 'POST' && a === 'login') {
+    const d = await body(request);
+    const id = intOrNull(d.person_id);
+    const p = id && (await env.DB.prepare('SELECT id, name, pin, pin_fails, pin_locked_until FROM people WHERE id = ?').bind(id).first());
+    if (!p) fail(404, 'Diese Person gibt es nicht.');
+    // Erstes Mal: Die Person legt ihren Code selbst fest
+    if (!isPin(p.pin)) {
+      if (!isPin(d.new_pin)) throw Object.assign(new HttpError(409, `${p.name} hat noch keinen Code.`), { extra: { needs_setup: true } });
+      const set = await env.DB.prepare(
+        "UPDATE people SET pin = ?, pin_set_at = datetime('now'), pin_fails = 0, pin_locked_until = NULL WHERE id = ? AND pin IS NULL RETURNING id",
+      )
+        .bind(String(d.new_pin), p.id)
+        .first();
+      if (!set) fail(409, `${p.name} hat gerade schon einen Code festgelegt.`);
+      return json({ token: `${p.id}.${await signPerson(env, p.id, String(d.new_pin))}`, person_id: p.id, created: true });
+    }
+    const now = Date.now();
+    if (p.pin_locked_until && p.pin_locked_until > now) {
+      const min = Math.ceil((p.pin_locked_until - now) / 60000);
+      fail(429, `Zu oft der falsche Code. Bitte in ${min} ${min === 1 ? 'Minute' : 'Minuten'} noch mal versuchen.`);
+    }
+    if (String(d.pin || '') !== p.pin) {
+      const fails = (p.pin_fails || 0) + 1;
+      const lock = fails >= PIN_MAX_FAILS;
+      await env.DB.prepare('UPDATE people SET pin_fails = ?, pin_locked_until = ? WHERE id = ?')
+        .bind(lock ? 0 : fails, lock ? now + PIN_LOCK_MS : null, p.id)
+        .run();
+      fail(403, lock ? 'Zu oft der falsche Code. Bitte in 5 Minuten noch mal versuchen.' : 'Der Code stimmt nicht.');
+    }
+    await env.DB.prepare('UPDATE people SET pin_fails = 0, pin_locked_until = NULL WHERE id = ?').bind(p.id).run();
+    return json({ token: `${p.id}.${await signPerson(env, p.id, p.pin)}`, person_id: p.id });
+  }
+
+  // "Code vergessen": zeigt den Code (Eric sieht in der Verwaltung, wer das benutzt hat)
+  if (m === 'POST' && a === 'people' && b && c === 'forgot') {
+    const p = await env.DB.prepare(
+      "UPDATE people SET pin_reveals = pin_reveals + 1, pin_revealed_at = datetime('now'), pin_fails = 0, pin_locked_until = NULL WHERE id = ? AND pin IS NOT NULL RETURNING pin",
+    )
+      .bind(intOrNull(b))
+      .first();
+    if (!p) fail(404, 'Für diese Person gibt es noch keinen Code. Einfach einen neuen festlegen.');
+    return json({ pin: p.pin });
+  }
+
+  // Vorschau und Suche verbrauchen Kontingent: nur für Angemeldete
+  if (m === 'GET' && (a === 'preview' || a === 'search') && !(await viewerOf(request, env))) {
+    await requireAdmin(request, env).catch(() => fail(401, 'Bitte melde dich zuerst mit deinem Code an.'));
   }
 
   // Link-Vorschau
@@ -156,11 +280,8 @@ async function route(request, env, url) {
     const d = await body(request);
     const round = await loadRound(env, intOrNull(d.round_id));
     assertEditable(round);
-    const personId = intOrNull(d.person_id);
-    const member = await env.DB.prepare('SELECT 1 FROM round_members WHERE round_id = ? AND person_id = ?')
-      .bind(round.id, personId)
-      .first();
-    if (!member) fail(400, 'Diese Person macht in dieser Runde nicht mit.');
+    const personId = await requireViewer(request, env);
+    if (!(await isMember(env, round.id, personId))) fail(400, 'Du machst in dieser Gruppe nicht mit.');
 
     let fields = {
       url: safeUrl(d.url),
@@ -189,11 +310,32 @@ async function route(request, env, url) {
     return json(row, 201);
   }
 
+  // Als gekauft markieren / Markierung entfernen
+  if (a === 'items' && b && c === 'purchase' && (m === 'POST' || m === 'DELETE')) {
+    const item = await getItem(env, intOrNull(b));
+    assertEditable(item);
+    const buyer = await requireViewer(request, env);
+    if (m === 'POST') {
+      if (buyer === item.person_id) fail(400, 'Deine eigenen Wünsche kannst du nicht als gekauft markieren.');
+      if (!(await isMember(env, item.round_id, buyer))) fail(400, 'Du machst in dieser Gruppe nicht mit.');
+      if (item.purchased_by && item.purchased_by !== buyer) {
+        const who = await env.DB.prepare('SELECT name FROM people WHERE id = ?').bind(item.purchased_by).first();
+        fail(409, `${who ? who.name : 'Jemand'} hat das schon gekauft.`);
+      }
+      await env.DB.prepare("UPDATE items SET purchased_by = ?, purchased_at = datetime('now') WHERE id = ?").bind(buyer, item.id).run();
+    } else {
+      if (item.purchased_by && item.purchased_by !== buyer) fail(403, 'Nur wer es gekauft hat, kann die Markierung entfernen.');
+      await env.DB.prepare('UPDATE items SET purchased_by = NULL, purchased_at = NULL WHERE id = ?').bind(item.id).run();
+    }
+    return json({ ok: true });
+  }
+
   // Idee ändern / löschen / Vorschau neu laden
   if (a === 'items' && b) {
     const id = intOrNull(b);
     const item = await getItem(env, id);
     assertEditable(item);
+    if ((await requireViewer(request, env)) !== item.person_id) fail(403, 'Das ist nicht dein Wunschzettel.');
 
     if (m === 'DELETE' && !c) {
       await env.DB.prepare('DELETE FROM items WHERE id = ?').bind(id).run();
@@ -232,28 +374,9 @@ async function route(request, env, url) {
     }
   }
 
-  // Als gekauft markieren / Markierung entfernen
-  if (a === 'items' && b && c === 'purchase' && (m === 'POST' || m === 'DELETE')) {
-    const item = await getItem(env, intOrNull(b));
-    assertEditable(item);
-    if (m === 'POST') {
-      const d = await body(request);
-      const buyer = intOrNull(d.person_id);
-      if (!buyer) fail(400, 'Bitte zuerst oben deinen Namen wählen.');
-      if (buyer === item.person_id) fail(400, 'Deine eigenen Wünsche kannst du nicht als gekauft markieren.');
-      if (item.purchased_by && item.purchased_by !== buyer) {
-        const who = await env.DB.prepare('SELECT name FROM people WHERE id = ?').bind(item.purchased_by).first();
-        fail(409, `${who ? who.name : 'Jemand'} hat das schon gekauft.`);
-      }
-      await env.DB.prepare("UPDATE items SET purchased_by = ?, purchased_at = datetime('now') WHERE id = ?").bind(buyer, item.id).run();
-    } else {
-      await env.DB.prepare('UPDATE items SET purchased_by = NULL, purchased_at = NULL WHERE id = ?').bind(item.id).run();
-    }
-    return json({ ok: true });
-  }
-
   // "Gut zu wissen" einer Person (darf jede*r für sich selbst pflegen)
   if (m === 'PATCH' && a === 'people' && b && !c) {
+    if ((await requireViewer(request, env)) !== intOrNull(b)) fail(403, 'Das kannst du nur für dich selbst ändern.');
     const d = await body(request);
     const row = await env.DB.prepare('UPDATE people SET about = ? WHERE id = ? RETURNING id, name, color, about')
       .bind(str(d.about, 2000), intOrNull(b))
@@ -266,31 +389,93 @@ async function route(request, env, url) {
   if (a === 'admin') {
     await requireAdmin(request, env);
 
-    if (m === 'POST' && b === 'check') return json({ ok: true });
+    if (m === 'POST' && b === 'check') return json({ ok: true, test: Boolean(env.TEST_MODE) });
+
+    // Codes einer Familie (nur für Eric)
+    if (m === 'GET' && b === 'pins') {
+      const rows = await env.DB.prepare(
+        `SELECT id, pin, pin_set_at, pin_reveals, pin_revealed_at FROM people
+         WHERE id IN (SELECT person_id FROM family_members WHERE family_id = ?)`,
+      )
+        .bind(q('family') || 0)
+        .all();
+      return json(rows.results);
+    }
+
+    // Familien
+    if (b === 'families') {
+      if (m === 'POST' && !c) {
+        const d = await body(request);
+        const name = str(d.name, 40);
+        if (!name) fail(400, 'Bitte einen Namen für die Familie eingeben.');
+        try {
+          return json(
+            await env.DB.prepare(
+              'INSERT INTO families (name, sort) VALUES (?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM families)) RETURNING id, name',
+            )
+              .bind(name)
+              .first(),
+            201,
+          );
+        } catch {
+          fail(409, `Die Familie ${name} gibt es schon.`);
+        }
+      }
+      const id = intOrNull(c);
+      if (m === 'PATCH' && id) {
+        const d = await body(request);
+        const name = str(d.name, 40);
+        if (!name) fail(400, 'Der Name darf nicht leer sein.');
+        try {
+          const row = await env.DB.prepare('UPDATE families SET name = ? WHERE id = ? RETURNING id, name').bind(name, id).first();
+          if (!row) fail(404, 'Diese Familie gibt es nicht.');
+          return json(row);
+        } catch (e) {
+          if (e instanceof HttpError) throw e;
+          fail(409, `Die Familie ${name} gibt es schon.`);
+        }
+      }
+      if (m === 'DELETE' && id) {
+        const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM rounds WHERE family_id = ?').bind(id).first();
+        if (n.n > 0) fail(400, 'Lösch zuerst alle Gruppen dieser Familie.');
+        await env.DB.batch([
+          env.DB.prepare('DELETE FROM family_members WHERE family_id = ?').bind(id),
+          env.DB.prepare('DELETE FROM families WHERE id = ?').bind(id),
+        ]);
+        return json({ ok: true });
+      }
+    }
 
     // Personen
     if (b === 'people') {
       if (m === 'POST' && !c) {
         const d = await body(request);
         const name = str(d.name, 40);
+        const familyId = intOrNull(d.family_id);
         if (!name) fail(400, 'Bitte einen Namen eingeben.');
+        if (!familyId) fail(400, 'Es fehlt die Familie.');
         const color = isColor(d.color) ? d.color : '#C42F45';
-        let person;
-        try {
+        // Gibt es die Person schon (z. B. aus der anderen Familie)? Dann nur verknüpfen.
+        let person = await env.DB.prepare('SELECT id, name, color, about FROM people WHERE name = ? COLLATE NOCASE').bind(name).first();
+        const existed = Boolean(person);
+        if (!person) {
           person = await env.DB.prepare('INSERT INTO people (name, color) VALUES (?, ?) RETURNING id, name, color, about')
             .bind(name, color)
             .first();
-        } catch {
-          fail(409, `${name} gibt es schon.`);
         }
-        // Neue Personen machen in der aktuellen Runde direkt mit
-        const round = await loadRound(env, null);
-        if (round && d.join_current !== false) {
-          await env.DB.prepare('INSERT OR IGNORE INTO round_members (round_id, person_id) VALUES (?, ?)')
-            .bind(round.id, person.id)
-            .run();
+        const stmts = [
+          env.DB.prepare('INSERT OR IGNORE INTO family_members (family_id, person_id) VALUES (?, ?)').bind(familyId, person.id),
+        ];
+        const joinRound = intOrNull(d.join_round_id);
+        if (joinRound) {
+          stmts.push(
+            env.DB.prepare(
+              'INSERT OR IGNORE INTO round_members (round_id, person_id) SELECT id, ? FROM rounds WHERE id = ? AND family_id = ?',
+            ).bind(person.id, joinRound, familyId),
+          );
         }
-        return json(person, 201);
+        await env.DB.batch(stmts);
+        return json({ ...person, existed }, 201);
       }
       const id = intOrNull(c);
       if (m === 'PATCH' && id) {
@@ -300,40 +485,67 @@ async function route(request, env, url) {
         const name = 'name' in d ? str(d.name, 40) : cur.name;
         if (!name) fail(400, 'Der Name darf nicht leer sein.');
         const color = isColor(d.color) ? d.color : cur.color;
+        // pin: neuer Code; reset_pin: Code löschen, die Person legt beim nächsten Mal einen neuen fest
+        let pin = cur.pin;
+        let pinSetAt = cur.pin_set_at;
+        if (d.reset_pin) {
+          pin = null;
+          pinSetAt = null;
+        } else if ('pin' in d && String(d.pin) !== String(cur.pin)) {
+          if (!isPin(d.pin)) fail(400, 'Der Code muss aus genau 4 Ziffern bestehen.');
+          pin = String(d.pin);
+          pinSetAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        }
         try {
           return json(
-            await env.DB.prepare('UPDATE people SET name = ?, color = ? WHERE id = ? RETURNING id, name, color, about')
-              .bind(name, color, id)
+            await env.DB.prepare(
+              'UPDATE people SET name = ?, color = ?, pin = ?, pin_set_at = ?, pin_fails = 0, pin_locked_until = NULL WHERE id = ? RETURNING id, name, color, about, pin',
+            )
+              .bind(name, color, pin, pinSetAt, id)
               .first(),
           );
         } catch {
           fail(409, `${name} gibt es schon.`);
         }
       }
+      // Aus einer Familie entfernen. Ist die Person danach in keiner Familie mehr, wird sie ganz gelöscht.
       if (m === 'DELETE' && id) {
+        const familyId = q('family');
+        if (!familyId) fail(400, 'Es fehlt die Familie.');
         await env.DB.batch([
-          env.DB.prepare('DELETE FROM items WHERE person_id = ?').bind(id),
-          env.DB.prepare('DELETE FROM round_members WHERE person_id = ?').bind(id),
-          env.DB.prepare('DELETE FROM people WHERE id = ?').bind(id),
+          env.DB.prepare('DELETE FROM items WHERE person_id = ? AND round_id IN (SELECT id FROM rounds WHERE family_id = ?)').bind(id, familyId),
+          env.DB.prepare('DELETE FROM round_members WHERE person_id = ? AND round_id IN (SELECT id FROM rounds WHERE family_id = ?)').bind(id, familyId),
+          env.DB.prepare('DELETE FROM family_members WHERE person_id = ? AND family_id = ?').bind(id, familyId),
         ]);
-        return json({ ok: true });
+        const rest = await env.DB.prepare('SELECT COUNT(*) AS n FROM family_members WHERE person_id = ?').bind(id).first();
+        if (rest.n === 0) {
+          await env.DB.batch([
+            env.DB.prepare('DELETE FROM items WHERE person_id = ?').bind(id),
+            env.DB.prepare('UPDATE items SET purchased_by = NULL, purchased_at = NULL WHERE purchased_by = ?').bind(id),
+            env.DB.prepare('DELETE FROM round_members WHERE person_id = ?').bind(id),
+            env.DB.prepare('DELETE FROM people WHERE id = ?').bind(id),
+          ]);
+        }
+        return json({ ok: true, deleted: rest.n === 0 });
       }
     }
 
-    // Runden
+    // Gruppen (Tabelle rounds)
     if (b === 'rounds') {
       if (m === 'POST' && !c) {
         const d = await body(request);
+        const familyId = intOrNull(d.family_id);
+        const fam = familyId && (await env.DB.prepare('SELECT id FROM families WHERE id = ?').bind(familyId).first());
+        if (!fam) fail(400, 'Bitte eine Familie wählen.');
         const year = intOrNull(d.year) || new Date().getFullYear();
-        const title = str(d.title, 80) || `Weihnachten ${year}`;
+        const title = str(d.title, 80);
+        if (!title) fail(400, 'Bitte einen Namen für die Gruppe eingeben.');
         const memberIds = Array.isArray(d.member_ids) ? d.member_ids.map(intOrNull).filter(Boolean) : [];
-        const makeCurrent = d.make_current !== false;
-        if (makeCurrent) await env.DB.prepare('UPDATE rounds SET is_current = 0').run();
         const round = await env.DB.prepare(
-          `INSERT INTO rounds (title, year, budget_min, budget_max, exchange_date, is_current)
-           VALUES (?, ?, ?, ?, ?, ?) RETURNING *`,
+          `INSERT INTO rounds (family_id, title, year, budget_min, budget_max, exchange_date, is_current)
+           VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING ${ROUND_COLS}`,
         )
-          .bind(title, year, intOrNull(d.budget_min), intOrNull(d.budget_max), str(d.exchange_date, 10) || null, makeCurrent ? 1 : 0)
+          .bind(familyId, title, year, intOrNull(d.budget_min), intOrNull(d.budget_max), str(d.exchange_date, 10) || null, d.active === false ? 0 : 1)
           .first();
         const stmts = memberIds.map((pid) =>
           env.DB.prepare('INSERT OR IGNORE INTO round_members (round_id, person_id) VALUES (?, ?)').bind(round.id, pid),
@@ -356,10 +568,8 @@ async function route(request, env, url) {
       if (m === 'PATCH' && id) {
         const d = await body(request);
         const cur = await env.DB.prepare('SELECT * FROM rounds WHERE id = ?').bind(id).first();
-        if (!cur) fail(404, 'Diese Runde gibt es nicht.');
-        const stmts = [];
-        if (d.is_current) stmts.push(env.DB.prepare('UPDATE rounds SET is_current = 0'));
-        stmts.push(
+        if (!cur) fail(404, 'Diese Gruppe gibt es nicht.');
+        const stmts = [
           env.DB.prepare(
             'UPDATE rounds SET title = ?, year = ?, budget_min = ?, budget_max = ?, exchange_date = ?, is_current = ? WHERE id = ?',
           ).bind(
@@ -368,10 +578,10 @@ async function route(request, env, url) {
             'budget_min' in d ? intOrNull(d.budget_min) : cur.budget_min,
             'budget_max' in d ? intOrNull(d.budget_max) : cur.budget_max,
             'exchange_date' in d ? str(d.exchange_date, 10) || null : cur.exchange_date,
-            d.is_current ? 1 : cur.is_current,
+            'is_current' in d ? (d.is_current ? 1 : 0) : cur.is_current,
             id,
           ),
-        );
+        ];
         if (Array.isArray(d.member_ids)) {
           const ids = d.member_ids.map(intOrNull).filter(Boolean);
           stmts.push(env.DB.prepare('DELETE FROM round_members WHERE round_id = ?').bind(id));
@@ -380,21 +590,14 @@ async function route(request, env, url) {
           );
         }
         await env.DB.batch(stmts);
-        return json(await env.DB.prepare('SELECT * FROM rounds WHERE id = ?').bind(id).first());
+        return json(await env.DB.prepare(`SELECT ${ROUND_COLS} FROM rounds WHERE id = ?`).bind(id).first());
       }
       if (m === 'DELETE' && id) {
-        const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM rounds').first();
-        if (count.n <= 1) fail(400, 'Die letzte Runde kann nicht gelöscht werden.');
         await env.DB.batch([
           env.DB.prepare('DELETE FROM items WHERE round_id = ?').bind(id),
           env.DB.prepare('DELETE FROM round_members WHERE round_id = ?').bind(id),
           env.DB.prepare('DELETE FROM rounds WHERE id = ?').bind(id),
         ]);
-        // Sicherstellen, dass es weiterhin eine aktuelle Runde gibt
-        await env.DB.prepare(
-          `UPDATE rounds SET is_current = 1 WHERE id = (SELECT id FROM rounds ORDER BY year DESC, id DESC LIMIT 1)
-           AND NOT EXISTS (SELECT 1 FROM rounds WHERE is_current = 1)`,
-        ).run();
         return json({ ok: true });
       }
     }
@@ -408,12 +611,12 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
     const url = new URL(request.url);
     if (url.pathname === '/' || url.pathname === '') {
-      return json({ ok: true, hinweis: 'Das ist die Wichtel-API. Die Seite selbst liegt auf GitHub Pages.' });
+      return json({ ok: true, hinweis: 'Das ist die Wichtel-API. Die Seite selbst liegt auf GitHub Pages.', test: Boolean(env.TEST_MODE) });
     }
     try {
       return await route(request, env, url);
     } catch (e) {
-      if (e instanceof HttpError) return json({ error: e.message }, e.status);
+      if (e instanceof HttpError) return json({ error: e.message, ...(e.extra || {}) }, e.status);
       console.error(e);
       return json({ error: 'Da ist etwas schiefgelaufen. Bitte gleich noch mal versuchen.' }, 500);
     }

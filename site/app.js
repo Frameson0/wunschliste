@@ -1,8 +1,11 @@
-// Wichteln – Wunschzettel für die Familie
+// Wunschliste – Wunschzettel für die Familie
 // Reines JavaScript ohne Build-Schritt. Daten kommen vom Cloudflare Worker (window.WICHTEL_API).
 
 const API = String(window.WICHTEL_API || '').replace(/\/+$/, '');
-const KEYS = { me: 'wichteln.me', admin: 'wichteln.admin' };
+// Die Testversion läuft unter /test/ auf derselben Adresse und bekommt eigene Speicher-Schlüssel
+const TEST = Boolean(window.WICHTEL_TEST);
+const PFX = TEST ? 'wichteln.test.' : 'wichteln.';
+const KEYS = { token: `${PFX}token`, admin: `${PFX}admin`, family: `${PFX}family`, group: (fid) => `${PFX}group.${fid}` };
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -11,9 +14,18 @@ const store = {
 
 const S = {
   data: null,
+  family: parseInt(store.get(KEYS.family), 10) || null,
   viewRound: null,
-  me: parseInt(store.get(KEYS.me), 10) || null,
-  adminKey: store.get(KEYS.admin) || '',
+  token: store.get(KEYS.token) || '',
+  viewer: null,     // mit Code angemeldete Person
+  me: null,         // angemeldete Person, wenn sie in der angezeigten Gruppe mitmacht
+  pinFor: null,     // Person, deren Code gerade abgefragt wird
+  forgot: 0,        // Schritt beim "Code vergessen"
+  pinFirst: '',     // beim ersten Festlegen: der zuerst eingegebene Code
+  pins: [],         // Codes für die Verwaltung
+  // In der Testversion gilt auch das Passwort, mit dem du auf der Live-Seite angemeldet bist
+  adminKey: store.get(KEYS.admin) || (TEST ? store.get('wichteln.admin') || '' : ''),
+  needAdmin: false,
   adminOk: false,
   draft: null,      // neue Idee in Arbeit
   editing: null,    // id der Idee, die gerade bearbeitet wird
@@ -65,6 +77,20 @@ function budgetText(r) {
   return '';
 }
 
+// Weihnachts-Look nur, wenn der Termin der Gruppe in der Weihnachtszeit liegt (1. Dezember bis 6. Januar).
+// Ohne Termin entscheidet der Name ("Weihnachten", "Wichteln", "Advent" …).
+function xmasDate(str) {
+  const d = new Date(`${str}T00:00:00`);
+  if (isNaN(d)) return false;
+  return d.getMonth() === 11 || (d.getMonth() === 0 && d.getDate() <= 6);
+}
+function isXmas() {
+  const r = S.data && S.data.round;
+  if (!r) return false;
+  if (r.exchange_date) return xmasDate(r.exchange_date);
+  return /weihnacht|wichtel|advent|nikolaus|christmas|xmas/i.test(r.title || '');
+}
+
 function exchangeText(r) {
   if (!r || !r.exchange_date) return '';
   const d = new Date(`${r.exchange_date}T00:00:00`);
@@ -73,10 +99,16 @@ function exchangeText(r) {
   today.setHours(0, 0, 0, 0);
   const days = Math.round((d - today) / 86400000);
   const date = d.toLocaleDateString('de-DE', { day: 'numeric', month: 'long' });
-  if (days > 1) return `Bescherung am ${date}, in ${days} Tagen`;
-  if (days === 1) return `Bescherung morgen, am ${date}`;
-  if (days === 0) return 'Heute ist Bescherung!';
-  return `Bescherung war am ${date}`;
+  if (xmasDate(r.exchange_date)) {
+    if (days > 1) return `Bescherung am ${date}, in ${days} Tagen`;
+    if (days === 1) return `Bescherung morgen, am ${date}`;
+    if (days === 0) return 'Heute ist Bescherung!';
+    return `Bescherung war am ${date}`;
+  }
+  if (days > 1) return `Am ${date}, in ${days} Tagen`;
+  if (days === 1) return `Morgen ist es so weit (${date})`;
+  if (days === 0) return 'Heute ist es so weit!';
+  return `War am ${date}`;
 }
 
 let toastTimer;
@@ -89,20 +121,22 @@ function toast(msg, kind = '') {
 }
 
 async function api(path, { method = 'GET', body, admin = false } = {}) {
-  if (!API) throw new Error('Die Adresse der Wichtel-API fehlt in config.js.');
+  if (!API) throw new Error('Die Adresse der API fehlt in config.js.');
   const headers = {};
   if (body) headers['Content-Type'] = 'application/json';
-  if (admin) headers['X-Admin-Key'] = S.adminKey;
+  if (admin || TEST) headers['X-Admin-Key'] = S.adminKey;
+  if (S.token) headers['X-Person-Token'] = S.token;
   let res;
   try {
     res = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   } catch {
-    throw new Error('Keine Verbindung zur Wichtel-API. Prüf deine Internetverbindung und versuch es noch mal.');
+    throw new Error('Keine Verbindung zum Server. Prüf deine Internetverbindung und versuch es noch mal.');
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const e = new Error(data.error || `Fehler ${res.status}`);
     e.status = res.status;
+    if (data.admin_required) { S.needAdmin = true; S.adminOk = false; }
     throw e;
   }
   return data;
@@ -110,16 +144,43 @@ async function api(path, { method = 'GET', body, admin = false } = {}) {
 
 async function load() {
   const qs = new URLSearchParams();
-  if (S.viewRound) qs.set('round', S.viewRound);
-  if (S.me) qs.set('viewer', S.me);
-  S.data = await api(`/api/state${qs.toString() ? `?${qs}` : ''}`);
+  if (S.family) {
+    qs.set('family', S.family);
+    if (!S.viewRound) S.viewRound = parseInt(store.get(KEYS.group(S.family)), 10) || null;
+    if (S.viewRound) qs.set('round', S.viewRound);
+  }
+  const d = await api(`/api/state${qs.toString() ? `?${qs}` : ''}`);
+  S.data = d;
   S.error = null;
-  if (S.me && !S.data.people.some((p) => p.id === S.me)) setMe(null);
+  S.needAdmin = false;
+  if (d.family && d.family.id !== S.family) setFamily(d.family.id);
+  if (!d.family && S.family) setFamily(null);
+  if (S.viewRound && !d.rounds.some((r) => r.id === S.viewRound)) setGroup(null);
+  if (S.token && !d.viewer) setToken(''); // Code wurde geändert: neu anmelden
+  S.viewer = d.viewer;
+  S.me = d.viewer && d.members.includes(d.viewer) ? d.viewer : null;
+  if (S.adminOk && route().view === 'admin' && d.family) {
+    S.pins = await api(`/api/admin/pins?family=${d.family.id}`, { admin: true }).catch(() => []);
+  }
 }
 
-function setMe(id) {
-  S.me = id;
-  store.set(KEYS.me, id ? String(id) : null);
+function setToken(token) {
+  S.token = token || '';
+  store.set(KEYS.token, token || null);
+  if (!token) { S.viewer = null; S.me = null; }
+}
+
+const logout = () => setToken('');
+
+function setFamily(id) {
+  S.family = id;
+  S.viewRound = null;
+  if (id) store.set(KEYS.family, String(id)); // bleibt als "zuletzt geöffnet" gemerkt
+}
+
+function setGroup(id) {
+  S.viewRound = id;
+  if (S.family) store.set(KEYS.group(S.family), id ? String(id) : null);
 }
 
 // ---------- abgeleitete Daten ----------
@@ -130,7 +191,12 @@ const people = () => (S.data ? S.data.people : []);
 const person = (id) => people().find((p) => p.id === id);
 const members = () => people().filter((p) => S.data.members.includes(p.id));
 const itemsOf = (id) => S.data.items.filter((i) => i.person_id === id);
-const currentRoundId = () => (S.data.rounds.find((r) => r.is_current) || {}).id;
+const family = () => S.data && S.data.family;
+const activeRounds = () => (S.data ? S.data.rounds.filter((r) => r.is_current) : []);
+const familyPeople = () => people().filter((p) => S.data.family_people.includes(p.id));
+// Mehrere aktive Gruppen und noch keine gewählt: erst fragen
+const needGroupChoice = () => Boolean(family() && !S.viewRound && activeRounds().length > 1);
+const roundLabel = (r) => (String(r.title).includes(String(r.year)) || String(r.title).includes(String(r.year).slice(2)) ? r.title : `${r.title} (${r.year})`);
 
 function route() {
   const h = location.hash.replace(/^#\/?/, '');
@@ -146,7 +212,7 @@ function garland(list, { activeId = null, big = false, pick = false } = {}) {
   const drops = [26, 50, 34, 58, 30, 46, 38, 54];
   const n = list.length || 1;
   return `
-  <nav class="garland ${big ? 'garland--big' : ''} ${S.firstPaint ? 'is-entering' : ''}" aria-label="${pick ? 'Wer bist du?' : 'Wunschzettel der Familie'}">
+  <nav class="garland ${big ? 'garland--big' : ''} ${list.length > 7 ? 'garland--many' : ''} ${S.firstPaint ? 'is-entering' : ''}" aria-label="${pick ? 'Wer bist du?' : 'Wunschzettel der Familie'}">
     <svg class="garland__rope" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><path d="M-2,1 Q50,10 102,1" vector-effect="non-scaling-stroke"/></svg>
     <ul>
       ${list
@@ -174,8 +240,12 @@ function garland(list, { activeId = null, big = false, pick = false } = {}) {
 function topbar() {
   const me = person(S.me);
   return `
+  ${TEST ? '<div class="testbar" role="note"><strong>Testversion</strong> · nur für dich sichtbar · eigene Testdaten</div>' : ''}
   <header class="topbar">
-    <a class="brand" href="#/">Wichteln</a>
+    <span class="topbar__left">
+      <a class="brand" href="#/">Wunschliste</a>
+      ${family() ? `<button class="ctx" type="button" data-act="switch-family" aria-label="Familie wechseln, gerade: ${esc(family().name)}">${esc(family().name)}<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3"/></svg></button>` : ''}
+    </span>
     ${
       me
         ? `<div class="whoami"><span>Du bist <strong>${esc(me.name)}</strong></span><button class="btn btn--ghost btn--small" data-act="switch">Wechseln</button></div>`
@@ -186,9 +256,9 @@ function topbar() {
 
 function archiveBanner() {
   if (!round() || round().is_current) return '';
-  const cur = S.data.rounds.find((r) => r.is_current);
-  return `<div class="archive" role="note">Du schaust dir <strong>${esc(round().title)}</strong> an. Ältere Wunschzettel lassen sich nicht mehr ändern.
-    ${cur ? `<button class="btn btn--small btn--ghost-dark" data-act="round" data-id="">Zurück zu ${esc(cur.title)}</button>` : ''}</div>`;
+  const cur = activeRounds()[0];
+  return `<div class="archive" role="note"><strong>${esc(round().title)}</strong> ist archiviert. Die Wunschzettel lassen sich nicht mehr ändern.
+    ${cur ? `<button class="btn btn--small btn--ghost-dark" data-act="round" data-id="${cur.id}">Zu ${esc(cur.title)}</button>` : ''}</div>`;
 }
 
 const REINDEER_SVG = `
@@ -210,11 +280,30 @@ const REINDEER_SVG = `
   <circle cx="60" cy="113" r="3.6" fill="#e3a82b"/>
 </svg>`;
 
+// Außerhalb der Weihnachtszeit hilft ein kleines Geschenk statt des Rentiers
+const GIFT_SVG = `
+<svg class="reindeer gift" viewBox="0 0 120 130" aria-hidden="true">
+  <path d="M60 42 C48 20 26 22 32 38 C35 45 50 44 60 42 Z" fill="#efb03f"/>
+  <path d="M60 42 C72 20 94 22 88 38 C85 45 70 44 60 42 Z" fill="#efb03f"/>
+  <path d="M60 42 C52 31 41 30 40 36" fill="none" stroke="#c98a1c" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M60 42 C68 31 79 30 80 36" fill="none" stroke="#c98a1c" stroke-width="2.4" stroke-linecap="round"/>
+  <rect x="24" y="42" width="72" height="18" rx="5" fill="#c4432f"/>
+  <rect x="30" y="58" width="60" height="58" rx="7" fill="#e0553f"/>
+  <rect x="54" y="42" width="12" height="74" fill="#efb03f"/>
+  <circle cx="60" cy="42" r="6" fill="#f6c766"/>
+  <circle cx="43" cy="78" r="4.2" fill="#1e2b3c"/><circle cx="77" cy="78" r="4.2" fill="#1e2b3c"/>
+  <circle cx="44.3" cy="76.6" r="1.4" fill="#fff"/><circle cx="78.3" cy="76.6" r="1.4" fill="#fff"/>
+  <circle cx="38" cy="90" r="4.5" fill="#f19a8b"/><circle cx="82" cy="90" r="4.5" fill="#f19a8b"/>
+  <path d="M48 92 Q60 102 72 92" fill="none" stroke="#1e2b3c" stroke-width="2.6" stroke-linecap="round"/>
+  <ellipse cx="44" cy="120" rx="8" ry="4.5" fill="#c4432f"/><ellipse cx="76" cy="120" rx="8" ry="4.5" fill="#c4432f"/>
+</svg>`;
+const helperSvg = () => (isXmas() ? REINDEER_SVG : GIFT_SVG);
+
 function helper() {
   return `
   <div class="helper-wrap">
     <button class="helper" type="button" data-act="tour" aria-label="Hilfe: Wie geht das alles? Kurze Anleitung starten">
-      ${REINDEER_SVG}
+      ${helperSvg()}
       <span class="helper__sign" aria-hidden="true"><span>Hilfe!</span> Wie geht das alles?</span>
     </button>
   </div>`;
@@ -227,9 +316,9 @@ function footer() {
   <footer class="footer">
     ${
       rounds.length > 1
-        ? `<label class="footer__rounds">Jahr
+        ? `<label class="footer__rounds">Gruppe
             <select data-act="round-select">
-              ${rounds.map((r) => `<option value="${r.id}" ${round() && r.id === round().id ? 'selected' : ''}>${esc(r.title)}</option>`).join('')}
+              ${rounds.map((r) => `<option value="${r.id}" ${round() && r.id === round().id ? 'selected' : ''}>${esc(roundLabel(r))}${r.is_current ? '' : ' · archiviert'}</option>`).join('')}
             </select></label>`
         : '<span></span>'
     }
@@ -246,6 +335,163 @@ function thumb(it, size = '') {
 
 // ---------- Ansichten ----------
 
+function viewTestLogin() {
+  return `
+  <div class="testbar" role="note"><strong>Testversion</strong> · nur für dich sichtbar</div>
+  <main id="main" class="admin">
+    <h1>Testversion</h1>
+    <section class="paper"><div class="paper__inner">
+      <p class="muted">Die Testversion ist nur mit dem Admin-Passwort zugänglich. Sie hat eigene Testdaten, an der echten Seite ändert sich nichts.</p>
+      <form data-form="admin-login" class="stack">
+        <label class="field"><span>Admin-Passwort</span><input type="password" name="key" autocomplete="current-password" required></label>
+        <button class="btn btn--primary" type="submit">Anmelden</button>
+      </form>
+    </div></section>
+    <p><a href="../">Zur echten Seite</a></p>
+  </main>`;
+}
+
+function viewFamilyPicker() {
+  const fams = S.data.families;
+  const lists = S.data.lists || [];
+  const last = parseInt(store.get(KEYS.family), 10) || null;
+  const lastGroup = last ? parseInt(store.get(KEYS.group(last)), 10) || null : null;
+  return `
+  ${topbar()}
+  <main id="main" class="choose start">
+    <div class="choose__text">
+      <h1>Zu welcher Liste willst du?</h1>
+      <p>Tipp auf die Liste deiner Familie. Danach wählst du deinen Namen.</p>
+    </div>
+    <div class="start__fams">
+      ${fams
+        .map((f, i) => {
+          const own = lists.filter((r) => r.family_id === f.id);
+          return `
+        <section class="start__fam paper" style="--c:${PALETTE[(i * 3) % PALETTE.length]}">
+          <div class="paper__inner">
+            <h2 class="start__head"><span class="family-card__ball" aria-hidden="true">${esc(f.name.slice(0, 1).toUpperCase())}</span><span class="family-card__name"><small>Familie</small>${esc(f.name)}</span></h2>
+            ${
+              own.length
+                ? `<ul class="start__lists">${own
+                    .map((r) => {
+                      const facts = [exchangeText(r), budgetText(r) && `Budget ${budgetText(r)}`].filter(Boolean).join(' · ');
+                      return `<li><button class="start__list" type="button" data-act="pick-list" data-family="${f.id}" data-id="${r.id}">
+                        <span class="start__title">${esc(r.title)}${r.id === lastGroup ? '<span class="pill pill--last">zuletzt</span>' : ''}</span>
+                        ${facts ? `<span class="start__facts">${esc(facts)}</span>` : ''}
+                        <svg class="start__arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+                      </button></li>`;
+                    })
+                    .join('')}</ul>`
+                : `<p class="muted start__empty">Noch keine Liste. <button class="linklike" type="button" data-act="pick-family" data-id="${f.id}">Familie öffnen</button></p>`
+            }
+          </div>
+        </section>`;
+        })
+        .join('')}
+      ${fams.length ? '' : '<p class="empty">Es gibt noch keine Familie. Leg sie in der Verwaltung an.</p>'}
+    </div>
+  </main>
+  ${footer()}`;
+}
+
+function viewGroupPicker() {
+  const list = activeRounds();
+  return `
+  ${topbar()}
+  <main id="main" class="choose">
+    <div class="choose__text">
+      <h1>Welche Liste?</h1>
+      <p>In der Familie ${esc(family().name)} gibt es gerade mehrere Listen. Tipp auf die, die du suchst.</p>
+    </div>
+    <div class="choose__list">
+      ${list
+        .map((r) => {
+          const facts = [budgetText(r) && `Budget ${budgetText(r)}`, exchangeText(r)].filter(Boolean).join(' · ');
+          return `
+        <button class="group-card paper" type="button" data-act="round" data-id="${r.id}">
+          <span class="paper__inner">
+            <span class="group-card__year">${r.year}</span>
+            <span class="group-card__title">${esc(r.title)}</span>
+            ${facts ? `<span class="group-card__facts">${esc(facts)}</span>` : ''}
+          </span>
+        </button>`;
+        })
+        .join('')}
+    </div>
+  </main>
+  ${footer()}`;
+}
+
+function viewNoGroup() {
+  return `
+  ${topbar()}
+  <main id="main" class="choose">
+    <div class="choose__text">
+      <h1>Familie ${esc(family().name)}</h1>
+      <p>Für die Familie ${esc(family().name)} gibt es noch keine Liste.${S.adminOk ? '' : ' Sobald Eric eine anlegt, geht es hier los.'}</p>
+      ${S.adminOk ? '<p><a class="btn btn--primary" href="#/admin">Gruppe anlegen</a></p>' : ''}
+      <p><button class="btn btn--ghost" type="button" data-act="switch-family">Andere Familie wählen</button></p>
+    </div>
+  </main>
+  ${footer()}`;
+}
+
+function viewPin() {
+  const p = person(S.pinFor);
+  if (!p) { S.pinFor = null; return viewPicker(); }
+  if (!p.has_pin) return viewPinSetup(p);
+  return `
+  ${topbar()}
+  <main id="main" class="choose pin" style="--c:${esc(p.color)}">
+    <span class="pin__ball ${isLight(p.color) ? 'is-light' : ''}" aria-hidden="true">${esc(p.name.slice(0, 1).toUpperCase())}</span>
+    <div class="choose__text">
+      <h1>Hallo ${esc(p.name)}!</h1>
+      <p>Gib deinen 4-stelligen Code ein.</p>
+    </div>
+    <form class="pin__form" data-form="pin-login" autocomplete="off">
+      <label class="sr" for="pin">Code für ${esc(p.name)}</label>
+      <input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="one-time-code" enterkeyhint="go" placeholder="····" aria-describedby="pin-hint">
+      <button class="btn btn--primary pin__go" type="submit">Weiter</button>
+    </form>
+    <p class="pin__reveal" role="status"></p>
+    <div class="pin__more">
+      <button class="btn btn--ghost" type="button" data-act="pin-back">Ich bin jemand anderes</button>
+      ${S.forgot < 4 ? `<button class="linklike pin__forgot ${S.forgot ? 'is-asking' : ''}" type="button" data-act="forgot">${esc(forgotLabel(p))}</button>` : ''}
+      <p class="hint" id="pin-hint">Das ist der Code, den du dir beim ersten Mal ausgedacht hast. Wer „Code vergessen“ benutzt, sieht Eric in der Verwaltung.</p>
+    </div>
+  </main>
+  ${footer()}`;
+}
+
+function viewPinSetup(p) {
+  const again = Boolean(S.pinFirst);
+  return `
+  ${topbar()}
+  <main id="main" class="choose pin" style="--c:${esc(p.color)}">
+    <span class="pin__ball ${isLight(p.color) ? 'is-light' : ''}" aria-hidden="true">${esc(p.name.slice(0, 1).toUpperCase())}</span>
+    <div class="choose__text">
+      <h1>${again ? 'Noch einmal, bitte' : `Hallo ${esc(p.name)}!`}</h1>
+      <p>${
+        again
+          ? 'Gib deinen neuen Code zur Sicherheit noch einmal ein.'
+          : 'Du bist zum ersten Mal hier. Denk dir einen 4-stelligen Code aus. Damit kann niemand sonst deinen Wunschzettel öffnen.'
+      }</p>
+    </div>
+    <form class="pin__form" data-form="pin-login" autocomplete="off">
+      <label class="sr" for="pin">${again ? 'Code wiederholen' : `Neuer Code für ${esc(p.name)}`}</label>
+      <input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="new-password" enterkeyhint="go" placeholder="····">
+      <button class="btn btn--primary pin__go" type="submit">${again ? 'Code speichern' : 'Weiter'}</button>
+    </form>
+    <p class="pin__steps" aria-hidden="true"><span class="${again ? '' : 'is-on'}"></span><span class="${again ? 'is-on' : ''}"></span></p>
+    <div class="pin__more">
+      <button class="btn btn--ghost" type="button" data-act="pin-back">Ich bin jemand anderes</button>
+      <p class="hint">Merk dir den Code gut, zum Beispiel ein Geburtstag oder eine Hausnummer. Vergessen ist aber auch kein Drama.</p>
+    </div>
+  </main>
+  ${footer()}`;
+}
+
 function viewPicker() {
   const list = members();
   return `
@@ -254,8 +500,8 @@ function viewPicker() {
     ${garland(list, { big: true, pick: true })}
     <div class="picker__text">
       <h1>Wer bist du?</h1>
-      <p>Tipp auf deine Kugel. Danach füllst du deinen Wunschzettel und schaust, was sich die anderen wünschen.</p>
-      ${list.length ? '' : '<p class="empty">Für dieses Jahr ist noch niemand eingetragen. Das geht in der Verwaltung.</p>'}
+      <p>Tipp auf ${isXmas() ? 'deine Kugel' : 'deinen Namen'}. Danach füllst du deinen Wunschzettel und schaust, was sich die anderen wünschen.</p>
+      ${list.length ? '' : '<p class="empty">In dieser Gruppe ist noch niemand eingetragen. Das geht in der Verwaltung.</p>'}
     </div>
   </main>
   ${footer()}`;
@@ -271,7 +517,7 @@ function viewHome() {
   ${garland(members())}
   <main id="main" class="home">
     <div class="intro">
-      <h1>${esc(r ? r.title : 'Wichteln')}</h1>
+      <h1>${esc(r ? r.title : 'Wunschliste')}</h1>
       ${facts ? `<p class="facts">${facts}</p>` : ''}
     </div>
     <div class="sheets">
@@ -416,13 +662,13 @@ function shareHelp() {
     <ol class="steps">
       <li>${
         S.installPrompt
-          ? 'Installiere Wichteln als App: <button class="btn btn--primary btn--small" type="button" data-act="install">Als App installieren</button>'
+          ? 'Installiere die Wunschliste als App: <button class="btn btn--primary btn--small" type="button" data-act="install">Als App installieren</button>'
           : isStandalone()
-            ? 'Wichteln ist schon als App installiert.'
-            : 'Installiere Wichteln als App: In Chrome oben rechts auf <strong>⋮</strong> und dann <strong>App installieren</strong> bzw. <strong>Zum Startbildschirm hinzufügen</strong>.'
+            ? 'Die Wunschliste ist schon als App installiert.'
+            : 'Installiere die Wunschliste als App: In Chrome oben rechts auf <strong>⋮</strong> und dann <strong>App installieren</strong> bzw. <strong>Zum Startbildschirm hinzufügen</strong>.'
       }</li>
-      <li>In der Amazon-App (oder jeder anderen App) beim Artikel auf <strong>Teilen</strong> tippen und <strong>Wichteln</strong> wählen.</li>
-      <li>Wichteln öffnet sich mit der Vorschau. Ein Tippen auf „Auf den Wunschzettel“, fertig.</li>
+      <li>In der Amazon-App (oder jeder anderen App) beim Artikel auf <strong>Teilen</strong> tippen und <strong>Wunschliste</strong> wählen.</li>
+      <li>Die Wunschliste öffnet sich mit der Vorschau. Ein Tippen auf „Auf den Wunschzettel“, fertig.</li>
     </ol>`;
   const first = isIOS() ? ['iPhone', ios, 'Android', android] : ['Android', android, 'iPhone', ios];
   return `
@@ -598,6 +844,12 @@ function viewPerson(id) {
 
 // ---------- Verwaltung ----------
 
+const pinOf = (id) => S.pins.find((x) => x.id === id) || {};
+const fmtDay = (s) => {
+  const d = new Date(String(s || '').replace(' ', 'T') + 'Z');
+  return isNaN(d) ? '' : d.toLocaleDateString('de-DE', { day: 'numeric', month: 'long' });
+};
+
 function viewAdmin() {
   if (!S.adminOk) {
     return `
@@ -613,15 +865,163 @@ function viewAdmin() {
       <p><a href="#/">Zurück zu den Wunschzetteln</a></p>
     </main>`;
   }
-  const r = round();
-  const cur = S.data.rounds.find((x) => x.is_current) || r;
-  const allPeople = people();
-  const memberSet = new Set(S.data.members);
-  const nextYear = Math.max(...S.data.rounds.map((x) => x.year), new Date().getFullYear() - 1) + 1;
+  const fam = family();
   const colorSelect = (name, value) => `
     <span class="swatches" role="radiogroup" aria-label="Farbe">
       ${PALETTE.map((c) => `<label class="swatch" style="--c:${c}"><input type="radio" name="${name}" value="${c}" ${c.toLowerCase() === String(value).toLowerCase() ? 'checked' : ''}><span class="sr">${c}</span></label>`).join('')}
     </span>`;
+  const famTabs = `
+    <div class="chips admin__tabs" role="group" aria-label="Familie">
+      ${S.data.families.map((f) => `<button type="button" class="chip" data-act="admin-family" data-id="${f.id}" aria-pressed="${fam && f.id === fam.id}">Familie ${esc(f.name)}</button>`).join('')}
+    </div>`;
+  const testLink = !TEST
+    ? `<section class="paper admin__test"><div class="paper__inner">
+        <h2>Testversion</h2>
+        <p class="muted">Neue Funktionen probierst du hier aus, bevor sie für alle live gehen. Sie hat eigene Testdaten und ist nur mit deinem Admin-Passwort sichtbar.</p>
+        <a class="btn btn--ghost" href="./test/#/admin">Testversion öffnen</a>
+      </div></section>`
+    : `<p class="note">Du bist in der Testversion. Änderungen hier betreffen nur die Testdaten. <a href="../#/admin">Zur echten Verwaltung</a></p>`;
+
+  const familiesBox = `
+    <section class="paper"><div class="paper__inner">
+      <h2>Familien</h2>
+      <ul class="people-admin">
+        ${S.data.families
+          .map(
+            (f) => `
+          <li><form data-form="admin-family" data-id="${f.id}" class="person-row">
+            <input name="name" value="${esc(f.name)}" maxlength="40" aria-label="Name der Familie">
+            <span class="person-row__actions">
+              <button class="btn btn--ghost btn--small" type="submit">Speichern</button>
+              <button class="btn btn--ghost btn--small btn--danger" type="button" data-act="admin-del-family" data-id="${f.id}">Löschen</button>
+            </span>
+          </form></li>`,
+          )
+          .join('')}
+      </ul>
+      <form data-form="admin-add-family" class="person-row person-row--new">
+        <input name="name" maxlength="40" placeholder="Neue Familie" aria-label="Name der neuen Familie" required>
+        <span class="person-row__actions"><button class="btn btn--primary btn--small" type="submit">Hinzufügen</button></span>
+      </form>
+    </div></section>`;
+
+  if (!fam) {
+    return `
+    ${topbar()}
+    <main id="main" class="admin">
+      <div class="admin__head"><h1>Verwaltung</h1><button class="btn btn--ghost btn--small" data-act="admin-logout">Abmelden</button></div>
+      ${famTabs}
+      <p class="muted">Wähl oben eine Familie aus.</p>
+      ${familiesBox}
+      ${testLink}
+    </main>`;
+  }
+
+  const r = round();
+  const famPeople = familyPeople();
+  const thisYear = new Date().getFullYear();
+  const memberChecks = (selected) =>
+    `<div class="checks">${people()
+      .filter((p) => S.data.family_people.includes(p.id) || selected.has(p.id))
+      .map((p) => `<label class="check"><input type="checkbox" name="member" value="${p.id}" ${selected.has(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`)
+      .join('')}</div>`;
+
+  const groupsBox = `
+    <section class="paper"><div class="paper__inner">
+      <h2>Gruppen der Familie ${esc(fam.name)}</h2>
+      ${
+        S.data.rounds.length
+          ? `<ul class="rounds-admin">
+          ${S.data.rounds
+            .map(
+              (x) => `<li class="${r && x.id === r.id ? 'is-selected' : ''}"><span><span class="pill pill--year">${x.year}</span> ${esc(x.title)}${x.is_current ? ' <span class="pill">aktiv</span>' : ' <span class="pill pill--muted">archiviert</span>'}</span>
+            <span class="person-row__actions">
+              ${r && x.id === r.id ? '<span class="muted">wird unten bearbeitet</span>' : `<button class="btn btn--ghost btn--small" data-act="round" data-id="${x.id}">Bearbeiten</button>`}
+              <button class="btn btn--ghost btn--small" data-act="admin-toggle-round" data-id="${x.id}">${x.is_current ? 'Archivieren' : 'Wieder aktiv'}</button>
+              <button class="btn btn--ghost btn--small btn--danger" data-act="admin-del-round" data-id="${x.id}">Löschen</button>
+            </span></li>`,
+            )
+            .join('')}
+        </ul>
+        <p class="hint">Aktive Gruppen sehen alle in der Familie. Sind mehrere aktiv, wählt man beim Öffnen die passende. Archivierte bleiben zum Nachschauen über „Gruppe“ ganz unten.</p>`
+          : '<p class="muted">Diese Familie hat noch keine Gruppe. Leg unten die erste an.</p>'
+      }
+    </div></section>`;
+
+  const editBox = r
+    ? `
+    <section class="paper"><div class="paper__inner">
+      <h2>${esc(r.title)} bearbeiten</h2>
+      <form data-form="admin-round" data-id="${r.id}" class="stack">
+        <div class="grid2">
+          <label class="field"><span>Name der Gruppe</span><input name="title" value="${esc(r.title)}" maxlength="80"></label>
+          <label class="field"><span>Jahr</span><input name="year" type="number" value="${r.year}"></label>
+          <label class="field"><span>Termin (Bescherung, Geburtstag …)</span><input name="exchange_date" type="date" value="${esc(r.exchange_date || '')}"></label>
+          <span></span>
+          <label class="field"><span>Budget von (€)</span><input name="budget_min" type="number" min="0" value="${r.budget_min ?? ''}"></label>
+          <label class="field"><span>Budget bis (€)</span><input name="budget_max" type="number" min="0" value="${r.budget_max ?? ''}"></label>
+        </div>
+        <fieldset class="field"><legend>Wer macht mit?</legend>${memberChecks(new Set(S.data.members))}</fieldset>
+        <div><button class="btn btn--primary" type="submit">Gruppe speichern</button></div>
+      </form>
+    </div></section>`
+    : '';
+
+  const newBox = `
+    <section class="paper"><div class="paper__inner">
+      <h2>Neue Gruppe anlegen</h2>
+      <p class="muted">Zum Beispiel fürs Wichteln, für Weihnachten oder einen Geburtstag. Liegt der Termin zwischen 1. Dezember und 6. Januar, sieht die Liste weihnachtlich aus. Ältere Gruppen bleiben erhalten.</p>
+      <form data-form="admin-new-round" class="stack">
+        <div class="grid2">
+          <label class="field"><span>Name der Gruppe</span><input name="title" maxlength="80" placeholder="z. B. Weihnachten ${esc(fam.name)} ${String(thisYear).slice(2)}" required></label>
+          <label class="field"><span>Jahr</span><input name="year" type="number" value="${thisYear}" required></label>
+          <label class="field"><span>Termin (Bescherung, Geburtstag …)</span><input name="exchange_date" type="date"></label>
+          <span></span>
+          <label class="field"><span>Budget von (€)</span><input name="budget_min" type="number" min="0"></label>
+          <label class="field"><span>Budget bis (€)</span><input name="budget_max" type="number" min="0"></label>
+        </div>
+        <fieldset class="field"><legend>Wer macht mit?</legend>${memberChecks(new Set(famPeople.map((p) => p.id)))}</fieldset>
+        ${
+          S.data.rounds.length
+            ? `<label class="field"><span>Wunschzettel übernehmen aus</span>
+            <select name="copy"><option value="">Nein, alle fangen leer an</option>
+              ${S.data.rounds.map((x) => `<option value="${x.id}">${esc(roundLabel(x))}</option>`).join('')}
+            </select></label>`
+            : '<input type="hidden" name="copy" value="">'
+        }
+        <div><button class="btn btn--primary" type="submit">Gruppe anlegen</button></div>
+      </form>
+    </div></section>`;
+
+  const peopleBox = `
+    <section class="paper"><div class="paper__inner">
+      <h2>Personen der Familie ${esc(fam.name)}</h2>
+      <ul class="people-admin">
+        ${famPeople
+          .map(
+            (p) => `
+          <li><form data-form="admin-person" data-id="${p.id}" class="person-row person-row--pin">
+            <input name="name" value="${esc(p.name)}" maxlength="40" aria-label="Name">
+            <label class="pin-field"><span>Code</span><input name="pin" value="${esc(pinOf(p.id).pin || '')}" placeholder="noch frei" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" aria-label="Code von ${esc(p.name)}"></label>
+            ${colorSelect(`color-${p.id}`, p.color)}
+            <span class="pin-status">${pinOf(p.id).pin ? `Code festgelegt${pinOf(p.id).pin_set_at ? ` am ${esc(fmtDay(pinOf(p.id).pin_set_at))}` : ''} · <button class="linklike" type="button" data-act="admin-reset-pin" data-id="${p.id}">Zurücksetzen</button>` : 'Hat noch keinen Code, legt ihn beim ersten Antippen selbst fest'}</span>
+            ${pinOf(p.id).pin_reveals ? `<span class="pin-note">Hat „Code vergessen“ ${pinOf(p.id).pin_reveals}× benutzt, zuletzt ${esc(fmtDay(pinOf(p.id).pin_revealed_at))}</span>` : ''}
+            <span class="person-row__actions">
+              <button class="btn btn--ghost btn--small" type="submit">Speichern</button>
+              <button class="btn btn--ghost btn--small btn--danger" type="button" data-act="admin-del-person" data-id="${p.id}">Entfernen</button>
+            </span>
+          </form></li>`,
+          )
+          .join('')}
+      </ul>
+      <form data-form="admin-add-person" class="person-row person-row--new">
+        <input name="name" maxlength="40" placeholder="Neue Person" aria-label="Name der neuen Person" required>
+        ${colorSelect('color-new', PALETTE[famPeople.length % PALETTE.length])}
+        <span class="person-row__actions"><button class="btn btn--primary btn--small" type="submit">Hinzufügen</button></span>
+        ${r && r.is_current ? `<label class="check person-row__join"><input type="checkbox" name="join" value="${r.id}" checked> macht bei ${esc(r.title)} mit</label>` : ''}
+      </form>
+      <p class="hint">Wer in mehreren Familien ist (wie Eric und Dana), ist dieselbe Person: „Gut zu wissen“ gilt überall, der Wunschzettel ist pro Gruppe eigen.</p>
+    </div></section>`;
 
   return `
   ${topbar()}
@@ -630,88 +1030,13 @@ function viewAdmin() {
       <h1>Verwaltung</h1>
       <button class="btn btn--ghost btn--small" data-act="admin-logout">Abmelden</button>
     </div>
-
-    ${r.id !== cur.id ? `<p class="note">Du bearbeitest gerade ${esc(r.title)}, nicht das aktuelle Jahr.</p>` : ''}
-
-    <section class="paper"><div class="paper__inner">
-      <h2>${esc(r.title)}</h2>
-      <form data-form="admin-round" data-id="${r.id}" class="stack">
-        <div class="grid2">
-          <label class="field"><span>Name der Runde</span><input name="title" value="${esc(r.title)}" maxlength="80"></label>
-          <label class="field"><span>Bescherung</span><input name="exchange_date" type="date" value="${esc(r.exchange_date || '')}"></label>
-          <label class="field"><span>Budget von (€)</span><input name="budget_min" type="number" min="0" value="${r.budget_min ?? ''}"></label>
-          <label class="field"><span>Budget bis (€)</span><input name="budget_max" type="number" min="0" value="${r.budget_max ?? ''}"></label>
-        </div>
-        <fieldset class="field"><legend>Wer macht mit?</legend>
-          <div class="checks">${allPeople.map((p) => `<label class="check"><input type="checkbox" name="member" value="${p.id}" ${memberSet.has(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('')}</div>
-        </fieldset>
-        <div><button class="btn btn--primary" type="submit">Runde speichern</button></div>
-      </form>
-    </div></section>
-
-    <section class="paper"><div class="paper__inner">
-      <h2>Personen</h2>
-      <ul class="people-admin">
-        ${allPeople
-          .map(
-            (p) => `
-          <li><form data-form="admin-person" data-id="${p.id}" class="person-row">
-            <input name="name" value="${esc(p.name)}" maxlength="40" aria-label="Name">
-            ${colorSelect(`color-${p.id}`, p.color)}
-            <span class="person-row__actions">
-              <button class="btn btn--ghost btn--small" type="submit">Speichern</button>
-              <button class="btn btn--ghost btn--small btn--danger" type="button" data-act="admin-del-person" data-id="${p.id}">Löschen</button>
-            </span>
-          </form></li>`,
-          )
-          .join('')}
-      </ul>
-      <form data-form="admin-add-person" class="person-row person-row--new">
-        <input name="name" maxlength="40" placeholder="Neue Person" aria-label="Name der neuen Person" required>
-        ${colorSelect('color-new', PALETTE[allPeople.length % PALETTE.length])}
-        <span class="person-row__actions"><button class="btn btn--primary btn--small" type="submit">Hinzufügen</button></span>
-      </form>
-    </div></section>
-
-    <section class="paper"><div class="paper__inner">
-      <h2>Neues Jahr starten</h2>
-      <p class="muted">Die neue Runde wird zur aktuellen. Ältere Runden bleiben zum Nachschauen erhalten.</p>
-      <form data-form="admin-new-round" class="stack">
-        <div class="grid2">
-          <label class="field"><span>Jahr</span><input name="year" type="number" value="${nextYear}" required></label>
-          <label class="field"><span>Bescherung</span><input name="exchange_date" type="date" value="${nextYear}-12-24"></label>
-          <label class="field"><span>Budget von (€)</span><input name="budget_min" type="number" min="0" value="${cur.budget_min ?? ''}"></label>
-          <label class="field"><span>Budget bis (€)</span><input name="budget_max" type="number" min="0" value="${cur.budget_max ?? ''}"></label>
-        </div>
-        <label class="check"><input type="checkbox" name="copy" value="${cur.id}"> Wunschzettel aus ${esc(cur.title)} übernehmen</label>
-        <div><button class="btn btn--primary" type="submit">Neues Jahr starten</button></div>
-      </form>
-    </div></section>
-
-    ${
-      S.data.rounds.length > 1
-        ? `<section class="paper"><div class="paper__inner">
-        <h2>Alle Runden</h2>
-        <ul class="rounds-admin">
-          ${S.data.rounds
-            .map(
-              (x) => `<li><span>${esc(x.title)}${x.is_current ? ' <span class="pill">aktuell</span>' : ''}</span>
-            <span class="person-row__actions">
-              ${x.id !== r.id ? `<button class="btn btn--ghost btn--small" data-act="round" data-id="${x.id}">Bearbeiten</button>` : ''}
-              ${x.is_current ? '' : `<button class="btn btn--ghost btn--small" data-act="admin-make-current" data-id="${x.id}">Zur aktuellen machen</button>`}
-              <button class="btn btn--ghost btn--small btn--danger" data-act="admin-del-round" data-id="${x.id}">Löschen</button>
-            </span></li>`,
-            )
-            .join('')}
-        </ul>
-      </div></section>`
-        : ''
-    }
-    <section class="paper admin__test"><div class="paper__inner">
-      <h2>Testversion</h2>
-      <p class="muted">Neue Funktionen probierst du hier aus, bevor sie für alle live gehen. Sie hat eigene Testdaten und ist nur mit deinem Admin-Passwort sichtbar.</p>
-      <a class="btn btn--ghost" href="./test/#/admin">Testversion öffnen</a>
-    </div></section>
+    ${famTabs}
+    ${groupsBox}
+    ${editBox}
+    ${newBox}
+    ${peopleBox}
+    ${familiesBox}
+    ${testLink}
     <p><a href="#/">Zurück zu den Wunschzetteln</a></p>
   </main>`;
 }
@@ -729,29 +1054,49 @@ function render() {
       </main>`;
     return;
   }
+  if (TEST && (S.needAdmin || !S.adminKey)) {
+    app.innerHTML = viewTestLogin();
+    applyTheme();
+    document.title = 'Test – Wunschliste';
+    return;
+  }
   if (!S.data) return;
   const r = route();
   let html;
   if (r.view === 'admin') html = viewAdmin();
+  else if (!family()) html = viewFamilyPicker();
+  else if (!round()) html = viewNoGroup();
+  else if (needGroupChoice()) html = viewGroupPicker();
+  else if (S.pinFor) html = viewPin();
   else if (!S.me) html = viewPicker();
   else if (r.view === 'person') html = viewPerson(r.id);
   else html = viewHome();
   app.innerHTML = html;
-  document.title = r.view === 'person' && person(r.id) ? `${person(r.id).name} – Wichteln` : 'Wichteln';
+  applyTheme();
+  document.title = `${TEST ? 'Test – ' : ''}${r.view === 'person' && person(r.id) ? `${person(r.id).name} – ` : ''}Wunschliste`;
   if (S.firstPaint) requestAnimationFrame(() => setTimeout(() => (S.firstPaint = false), 50));
+}
+
+function applyTheme() {
+  const x = isXmas();
+  document.body.classList.toggle('theme-xmas', x);
+  document.body.classList.toggle('theme-plain', !x);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = x ? '#123B2F' : '#1E2B3C';
 }
 
 function busyTyping() {
   const a = document.activeElement;
-  return Boolean(S.draft || S.editing || S.sheet.open || S.tour || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
+  return Boolean(S.pinFor || S.draft || S.editing || S.sheet.open || S.tour || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
 }
 
 async function refresh({ quiet = false } = {}) {
+  if (TEST && !S.adminKey) return render();
   try {
     await load();
   } catch (e) {
-    if (!quiet) toast(e.message, 'is-error');
-    if (!S.data) S.error = e.message;
+    if (!quiet && !S.needAdmin) toast(e.message, 'is-error');
+    if (!S.data && !S.needAdmin) S.error = e.message;
   }
   render();
 }
@@ -799,10 +1144,68 @@ function updateBrowseLinks() {
 }
 
 const actions = {
+  async 'pick-list'(el) {
+    setFamily(parseInt(el.dataset.family, 10));
+    setGroup(parseInt(el.dataset.id, 10));
+    S.draft = null; S.editing = null;
+    await refresh();
+    resetBrowse();
+    if (location.hash && location.hash !== '#/') location.hash = '#/';
+    if (sessionStorage.getItem(SHARE_KEY) && S.me) processShare();
+  },
+  async 'pick-family'(el) {
+    setFamily(parseInt(el.dataset.id, 10));
+    S.draft = null; S.editing = null;
+    await refresh();
+    resetBrowse();
+    if (location.hash && location.hash !== '#/') location.hash = '#/';
+    render();
+  },
+  async 'switch-family'() {
+    setFamily(null);
+    S.draft = null; S.editing = null;
+    if (S.sheet.open) closeSheet();
+    if (location.hash && location.hash !== '#/' && !location.hash.startsWith('#/admin')) location.hash = '#/';
+    await refresh();
+  },
+  async 'admin-family'(el) {
+    setFamily(parseInt(el.dataset.id, 10));
+    await refresh();
+    resetBrowse();
+  },
   async pick(el) {
-    setMe(parseInt(el.dataset.id, 10));
-    if (sessionStorage.getItem(SHARE_KEY)) processShare();
-    else location.hash = `#/p/${S.me}`;
+    const id = parseInt(el.dataset.id, 10);
+    if (id === S.viewer) return afterLogin();
+    S.pinFor = id;
+    S.forgot = 0;
+    S.pinFirst = '';
+    render();
+    const inp = $('#pin');
+    if (inp) inp.focus();
+  },
+  'pin-back'() { S.pinFor = null; S.forgot = 0; S.pinFirst = ''; render(); },
+  async 'admin-reset-pin'(el) {
+    const p = person(parseInt(el.dataset.id, 10));
+    if (!confirm(`Code von ${p.name} zurücksetzen? ${p.name} legt beim nächsten Antippen einen neuen fest. Auf allen Geräten muss ${p.name} sich dann neu anmelden.`)) return;
+    await adminCall(`/api/admin/people/${p.id}`, { method: 'PATCH', body: { reset_pin: true } }, `Code von ${p.name} ist zurückgesetzt`);
+  },
+  async forgot() {
+    const p = person(S.pinFor);
+    if (S.forgot < 3) {
+      S.forgot += 1;
+      const b = $('[data-act="forgot"]');
+      if (b) { b.textContent = forgotLabel(p); b.classList.add('is-asking'); b.focus(); }
+      return;
+    }
+    try {
+      const res = await api(`/api/people/${p.id}/forgot`, { method: 'POST' });
+      S.forgot = 4;
+      render();
+      const msg = $('.pin__reveal');
+      if (msg) msg.innerHTML = `Dein Code ist <strong>${esc(res.pin)}</strong>. Merk ihn dir gut!`;
+      const inp = $('#pin');
+      if (inp) { inp.value = res.pin; inp.focus(); }
+    } catch (e) { toast(e.message, 'is-error'); }
   },
   'sheet-open'(el) { openSheet(el); },
   tour() { startTour(); },
@@ -811,7 +1214,7 @@ const actions = {
     const p = person(it.person_id);
     if (!confirm(`Hast du „${it.title || 'diese Idee'}“ gekauft?\n\n${p.name} sieht das nicht. Alle anderen sehen es, damit niemand dasselbe kauft.`)) return;
     try {
-      await api(`/api/items/${it.id}/purchase`, { method: 'POST', body: { person_id: S.me } });
+      await api(`/api/items/${it.id}/purchase`, { method: 'POST' });
       toast(`Als gekauft markiert. ${p.name} sieht das nicht.`);
     } catch (e) { toast(e.message, 'is-error'); }
     await refresh();
@@ -865,7 +1268,7 @@ const actions = {
     pr.prompt();
     const choice = await pr.userChoice.catch(() => null);
     S.installPrompt = null;
-    if (choice && choice.outcome === 'accepted') toast('Wichteln wird installiert');
+    if (choice && choice.outcome === 'accepted') toast('Die Wunschliste wird installiert');
     render();
   },
   async copy(el) {
@@ -873,7 +1276,8 @@ const actions = {
     catch { toast('Kopieren ging nicht. Bitte von Hand markieren.', 'is-error'); }
   },
   switch() {
-    setMe(null);
+    logout();
+    S.pinFor = null;
     S.draft = null;
     S.editing = null;
     location.hash = '#/';
@@ -881,8 +1285,7 @@ const actions = {
   },
   reload() { refresh(); },
   async round(el) {
-    const id = parseInt(el.dataset.id, 10) || null;
-    S.viewRound = id && id !== currentRoundId() ? id : null;
+    setGroup(parseInt(el.dataset.id, 10) || null);
     S.draft = null; S.editing = null;
     await refresh();
     resetBrowse();
@@ -941,21 +1344,26 @@ const actions = {
   },
   async 'admin-del-person'(el) {
     const p = person(parseInt(el.dataset.id, 10));
-    if (!confirm(`${p.name} löschen? Alle Wunschzettel von ${p.name} werden dabei mitgelöscht, auch aus früheren Jahren.`)) return;
-    await adminCall(`/api/admin/people/${p.id}`, { method: 'DELETE' }, `${p.name} gelöscht`);
-    if (S.me === p.id) setMe(null);
+    const fam = family();
+    if (!confirm(`${p.name} aus der Familie ${fam.name} entfernen? Die Wunschzettel von ${p.name} in allen Gruppen dieser Familie werden dabei gelöscht.`)) return;
+    const res = await adminCall(`/api/admin/people/${p.id}?family=${fam.id}`, { method: 'DELETE' }, `${p.name} ist nicht mehr in der Familie ${fam.name}`);
+    if (res && res.deleted && S.viewer === p.id) logout();
   },
-  async 'admin-make-current'(el) {
-    await adminCall(`/api/admin/rounds/${el.dataset.id}`, { method: 'PATCH', body: { is_current: true } }, 'Ist jetzt die aktuelle Runde');
-    S.viewRound = null;
-    await refresh();
+  async 'admin-toggle-round'(el) {
+    const r = S.data.rounds.find((x) => x.id === parseInt(el.dataset.id, 10));
+    await adminCall(`/api/admin/rounds/${r.id}`, { method: 'PATCH', body: { is_current: !r.is_current } }, r.is_current ? `${r.title} ist archiviert` : `${r.title} ist wieder aktiv`);
   },
   async 'admin-del-round'(el) {
     const r = S.data.rounds.find((x) => x.id === parseInt(el.dataset.id, 10));
     if (!confirm(`${r.title} mit allen Wunschzetteln endgültig löschen?`)) return;
+    if (S.viewRound === r.id) setGroup(null);
     await adminCall(`/api/admin/rounds/${r.id}`, { method: 'DELETE' }, `${r.title} gelöscht`);
-    S.viewRound = null;
-    await refresh();
+  },
+  async 'admin-del-family'(el) {
+    const f = S.data.families.find((x) => x.id === parseInt(el.dataset.id, 10));
+    if (!confirm(`Familie ${f.name} löschen?`)) return;
+    const res = await adminCall(`/api/admin/families/${f.id}`, { method: 'DELETE' }, `Familie ${f.name} gelöscht`);
+    if (res && S.family === f.id) { setFamily(null); await refresh(); }
   },
 };
 
@@ -972,7 +1380,65 @@ async function adminCall(path, opts, okMsg) {
   }
 }
 
+function forgotLabel(p) {
+  return ['Code vergessen?', `Bist du wirklich ${p.name}?`, 'Ganz sicher?', 'Kein Schummeln?'][S.forgot] || 'Code vergessen?';
+}
+
+function afterLogin() {
+  S.pinFor = null;
+  S.forgot = 0;
+  S.pinFirst = '';
+  if (sessionStorage.getItem(SHARE_KEY)) return processShare();
+  if (location.hash !== `#/p/${S.me}`) location.hash = `#/p/${S.me}`;
+  else render();
+}
+
 const forms = {
+  async 'pin-login'(f) {
+    const pin = f.pin.value.replace(/\D/g, '');
+    if (pin.length !== 4) return f.pin.focus();
+    const setup = !person(S.pinFor).has_pin;
+    if (setup && !S.pinFirst) {
+      // Erst einmal eingeben, dann zur Sicherheit wiederholen
+      S.pinFirst = pin;
+      render();
+      $('#pin').focus();
+      return;
+    }
+    if (setup && pin !== S.pinFirst) {
+      S.pinFirst = '';
+      render();
+      const nf = $('[data-form="pin-login"]');
+      nf.classList.add('is-wrong');
+      toast('Die beiden Codes waren nicht gleich. Bitte noch mal von vorn.', 'is-error');
+      $('#pin').focus();
+      return;
+    }
+    const btn = f.querySelector('[type="submit"]');
+    btn.disabled = true;
+    try {
+      const body = setup ? { person_id: S.pinFor, new_pin: pin } : { person_id: S.pinFor, pin };
+      const res = await api('/api/login', { method: 'POST', body });
+      setToken(res.token);
+      await load();
+      if (res.created) toast('Dein Code ist gespeichert. Merk ihn dir gut!');
+      afterLogin();
+    } catch (e) {
+      if (setup || e.status === 409) {
+        // Code wurde inzwischen festgelegt (oder zurückgesetzt): Ansicht neu laden
+        S.pinFirst = '';
+        await load().catch(() => {});
+        render();
+        toast(e.message, 'is-error');
+        return;
+      }
+      btn.disabled = false;
+      f.pin.value = '';
+      f.classList.remove('is-wrong'); void f.offsetWidth; f.classList.add('is-wrong');
+      toast(e.message, 'is-error');
+      f.pin.focus();
+    }
+  },
   preview(f) { loadPreview(f.querySelector('#add-url').value); },
   finder(f) {
     const q = f.querySelector('#finder-q').value.trim();
@@ -1022,8 +1488,9 @@ const forms = {
     try {
       await api('/api/admin/check', { method: 'POST', admin: true });
       S.adminOk = true;
+      S.needAdmin = false;
       store.set(KEYS.admin, S.adminKey);
-      render();
+      await refresh();
     } catch (e) { toast(e.message, 'is-error'); }
   },
   async 'admin-round'(f) {
@@ -1032,39 +1499,58 @@ const forms = {
       exchange_date: f.exchange_date.value,
       budget_min: f.budget_min.value,
       budget_max: f.budget_max.value,
+      year: f.year.value,
       member_ids: [...f.querySelectorAll('[name="member"]:checked')].map((c) => parseInt(c.value, 10)),
     };
-    await adminCall(`/api/admin/rounds/${f.dataset.id}`, { method: 'PATCH', body }, 'Runde gespeichert');
+    await adminCall(`/api/admin/rounds/${f.dataset.id}`, { method: 'PATCH', body }, 'Gruppe gespeichert');
     resetBrowse();
   },
   async 'admin-person'(f) {
     const id = f.dataset.id;
     const color = (f.querySelector(`[name="color-${id}"]:checked`) || {}).value;
-    await adminCall(`/api/admin/people/${id}`, { method: 'PATCH', body: { name: f.name.value, color } }, 'Gespeichert');
+    const body = { name: f.name.value, color };
+    const pin = f.pin.value.trim();
+    if (pin && pin !== (pinOf(parseInt(id, 10)).pin || '')) body.pin = pin;
+    await adminCall(`/api/admin/people/${id}`, { method: 'PATCH', body }, 'Gespeichert');
   },
   async 'admin-add-person'(f) {
     const color = (f.querySelector('[name="color-new"]:checked') || {}).value;
-    await adminCall('/api/admin/people', { method: 'POST', body: { name: f.name.value, color } }, `${f.name.value} ist dabei`);
+    const join = f.join && f.join.checked ? parseInt(f.join.value, 10) : null;
+    const name = f.name.value.trim();
+    try {
+      const res = await api('/api/admin/people', { method: 'POST', admin: true, body: { name, color, family_id: family().id, join_round_id: join } });
+      toast(res.existed ? `${res.name} gab es schon und ist jetzt auch in der Familie ${family().name}` : `${res.name} ist dabei`);
+      await refresh();
+    } catch (e) { if (e.status === 401) { S.adminOk = false; render(); } toast(e.message, 'is-error'); }
   },
   async 'admin-new-round'(f) {
-    const year = parseInt(f.year.value, 10);
+    const title = f.title.value.trim();
+    if (!title) return f.title.focus();
     const res = await adminCall(
       '/api/admin/rounds',
       {
         method: 'POST',
         body: {
-          year,
-          title: `Weihnachten ${year}`,
+          family_id: family().id,
+          title,
+          year: parseInt(f.year.value, 10),
           exchange_date: f.exchange_date.value,
           budget_min: f.budget_min.value,
           budget_max: f.budget_max.value,
-          member_ids: S.data.members,
-          copy_items_from: f.copy.checked ? parseInt(f.copy.value, 10) : null,
+          member_ids: [...f.querySelectorAll('[name="member"]:checked')].map((c) => parseInt(c.value, 10)),
+          copy_items_from: parseInt(f.copy.value, 10) || null,
         },
       },
-      `Weihnachten ${year} ist gestartet`,
+      `${title} ist angelegt`,
     );
-    if (res) { S.viewRound = null; await refresh(); resetBrowse(); }
+    if (res) { setGroup(res.id); await refresh(); resetBrowse(); }
+  },
+  async 'admin-family'(f) {
+    await adminCall(`/api/admin/families/${f.dataset.id}`, { method: 'PATCH', body: { name: f.name.value } }, 'Gespeichert');
+  },
+  async 'admin-add-family'(f) {
+    const res = await adminCall('/api/admin/families', { method: 'POST', body: { name: f.name.value } }, `Familie ${f.name.value.trim()} ist angelegt`);
+    if (res) { setFamily(res.id); await refresh(); }
   },
 };
 
@@ -1314,18 +1800,24 @@ function processShare() {
   loadPreview(share.url, share.title);
 }
 
-// ---------- Kleine Anleitung (Rentier) ----------
+// ---------- Kleine Anleitung (Rentier bzw. Geschenk) ----------
 
 function tourSteps() {
+  if (!family()) {
+    return [
+      { sel: '.start__fams', title: 'Welche Liste?', text: 'Hier stehen alle Wunschlisten, sortiert nach Familie. Tipp auf die Liste, zu der du willst.' },
+      { sel: '.helper', title: 'Danach geht es weiter', text: 'Danach tippst du auf deinen Namen und gibst deinen Code ein. Drück dann noch einmal auf mich, dann zeige ich dir den Rest.' },
+    ];
+  }
   if (!S.me) {
     return [
-      { sel: '.garland', title: 'Wer bist du?', text: 'Jede Kugel ist eine Person aus der Familie. Tipp auf die Kugel mit deinem Namen.' },
-      { sel: '.helper', title: 'Danach geht es weiter', text: 'Wenn du deine Kugel angetippt hast, drück noch einmal auf mich. Dann zeige ich dir den Rest.' },
+      { sel: '.garland', title: 'Wer bist du?', text: `Jede${isXmas() ? ' Kugel' : 'r Kreis'} ist eine Person aus der Familie. Tipp auf deinen Namen und gib deinen Code ein.` },
+      { sel: '.helper', title: 'Danach geht es weiter', text: 'Wenn du angemeldet bist, drück noch einmal auf mich. Dann zeige ich dir den Rest.' },
     ];
   }
   const me = person(S.me);
   return [
-    { sel: '.garland', title: 'Das ist die Familie', text: `Jede Kugel ist eine Person. Deine Kugel ist mit „du“ markiert, ${esc(me ? me.name : '')}.` },
+    { sel: '.garland', title: 'Das ist die Familie', text: `Jede${isXmas() ? ' Kugel' : 'r Kreis'} ist eine Person. Dein${isXmas() ? 'e Kugel' : ' Kreis'} ist mit „du“ markiert, ${esc(me ? me.name : '')}.` },
     { sel: '.finder', title: 'Wünsche finden', text: 'Schreib hier hinein, was du dir wünschst, zum Beispiel „Tee“. Dann tippst du auf „Suchen“.' },
     {
       sel: '.finder',
@@ -1336,8 +1828,8 @@ function tourSteps() {
     { sel: '.add', title: 'Etwas aus einem anderen Laden?', text: 'Kopier im Laden den Link. Dann tippst du hier auf „Kopierten Link einfügen“. Du kannst auch eine Idee ohne Link aufschreiben.' },
     { sel: '#my-list', title: 'Dein Wunschzettel', text: 'Hier steht alles, was du dir wünschst. Mit dem Stern ☆ markierst du deinen größten Wunsch. Mit „Löschen“ nimmst du etwas wieder herunter.' },
     { sel: '.about', title: 'Gut zu wissen', text: 'Schreib hier Größen und Vorlieben auf, zum Beispiel deine Schuhgröße. Danach auf „Speichern“ tippen.' },
-    { sel: '.garland', title: 'Geschenk für jemand anderen', text: 'Tipp oben auf die Kugel der Person, die du beschenkst. Hast du etwas von ihrem Zettel gekauft, tipp dort auf „Hab ich gekauft“. Die Person sieht das nicht, alle anderen schon. So kauft niemand doppelt.' },
-    { sel: '.helper', title: 'Das war’s!', text: 'Wenn du wieder Hilfe brauchst, drück einfach auf mich. Frohe Weihnachten!' },
+    { sel: '.garland', title: 'Geschenk für jemand anderen', text: `Tipp oben auf ${isXmas() ? 'die Kugel' : 'den Namen'} der Person, die du beschenkst. Hast du etwas von ihrem Zettel gekauft, tipp dort auf „Hab ich gekauft“. Die Person sieht das nicht, alle anderen schon. So kauft niemand doppelt.` },
+    { sel: '.helper', title: 'Das war’s!', text: `Wenn du wieder Hilfe brauchst, drück einfach auf mich. ${isXmas() ? 'Frohe Weihnachten!' : 'Viel Spaß beim Wünschen!'}` },
   ];
 }
 
@@ -1391,7 +1883,7 @@ function showTourStep() {
       <div class="tour__block"></div>
       <div class="tour__spot" aria-hidden="true"></div>
       <div class="tour__bubble">
-        <div class="tour__top">${REINDEER_SVG}<span class="tour__count">Schritt ${i + 1} von ${steps.length}</span></div>
+        <div class="tour__top">${helperSvg()}<span class="tour__count">Schritt ${i + 1} von ${steps.length}</span></div>
         <h2 id="tour-title">${st.title}</h2>
         <p id="tour-text">${st.text}</p>
         ${st.demo || ''}
@@ -1472,6 +1964,15 @@ document.addEventListener('change', (ev) => {
 
 document.addEventListener('input', (ev) => {
   const t = ev.target;
+  if (t.id === 'pin') {
+    t.value = t.value.replace(/\D/g, '').slice(0, 4);
+    if (t.value.length === 4) t.form.requestSubmit();
+  }
+  // Neue Gruppe: Bescherungsdatum wandert mit dem Jahr mit
+  if (t.name === 'year' && t.form && t.form.dataset.form === 'admin-new-round' && /^\d{4}$/.test(t.value)) {
+    const d = t.form.exchange_date;
+    if (d.value) d.value = `${t.value}${d.value.slice(4)}`;
+  }
   if (t.id === 'sheet-q') S.sheet.q = t.value;
   if (t.dataset.browse) {
     S.browse[t.dataset.browse] = t.value;
@@ -1498,8 +1999,10 @@ window.addEventListener('popstate', () => {
 });
 
 window.addEventListener('hashchange', () => {
+  if (S.tour) endTour();
   S.draft = null;
   S.editing = null;
+  if (route().view === 'admin' && S.adminOk) refresh({ quiet: true });
   render();
   window.scrollTo(0, 0);
 });
@@ -1512,7 +2015,9 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && !b
 
 (async function start() {
   captureShare();
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  // Beim Öffnen immer fragen, zu welcher Liste es geht
+  if (!location.hash || location.hash === '#' || location.hash === '#/') S.family = null;
+  if (!TEST && 'serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
   window.addEventListener('beforeinstallprompt', (e) => {
@@ -1521,13 +2026,17 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && !b
     if (S.shareHelp) render();
   });
   try {
-    await load();
-    resetBrowse();
     if (S.adminKey) {
       try { await api('/api/admin/check', { method: 'POST', admin: true }); S.adminOk = true; } catch { S.adminOk = false; }
     }
+    if (!TEST || S.adminOk) {
+      await load();
+      resetBrowse();
+    } else {
+      S.needAdmin = true;
+    }
   } catch (e) {
-    S.error = e.message;
+    if (!S.needAdmin) S.error = e.message;
   }
   render();
   processShare();

@@ -1,7 +1,7 @@
 {
-  "name": "Wichteln",
-  "short_name": "Wichteln",
-  "description": "Unsere Wunschzettel fürs Familien-Wichteln",
+  "name": "Wunschliste",
+  "short_name": "Wunschliste",
+  "description": "Unsere Wunschzettel für die Familie",
   "lang": "de",
   "start_url": "./",
   "scope": "./",
