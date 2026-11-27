@@ -11,6 +11,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write
 
 concurrency:
   group: deploy
@@ -100,11 +101,23 @@ jobs:
           if [ -n "$SERPAPI_KEY" ]; then printf '%s' "$SERPAPI_KEY" | npx wrangler secret put SERPAPI_KEY ${{ matrix.env_flag }}; else echo "SERPAPI_KEY ist nicht gesetzt."; fi
           if [ -n "$AMAZONSCRAPER_KEY" ]; then printf '%s' "$AMAZONSCRAPER_KEY" | npx wrangler secret put AMAZONSCRAPER_KEY ${{ matrix.env_flag }}; else echo "AMAZONSCRAPER_KEY ist nicht gesetzt."; fi
 
+  # GitHub Pages darf nur von "main" aus veröffentlichen. Ein Push auf "test" stößt deshalb
+  # einen Lauf auf "main" an, der beide Fassungen der Seite neu baut.
+  pages-anstossen:
+    name: Webseite über main neu bauen
+    needs: api
+    if: ${{ !cancelled() && github.ref == 'refs/heads/test' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh workflow run deploy.yml --ref main -R "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   site:
     name: Webseite (GitHub Pages)
     needs: api
     # Auch veröffentlichen, wenn nur die Testversion der API gehakt hat
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
