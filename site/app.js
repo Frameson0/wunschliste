@@ -175,7 +175,7 @@ const logout = () => setToken('');
 function setFamily(id) {
   S.family = id;
   S.viewRound = null;
-  store.set(KEYS.family, id ? String(id) : null);
+  if (id) store.set(KEYS.family, String(id)); // bleibt als "zuletzt geöffnet" gemerkt
 }
 
 function setGroup(id) {
@@ -353,24 +353,41 @@ function viewTestLogin() {
 
 function viewFamilyPicker() {
   const fams = S.data.families;
+  const lists = S.data.lists || [];
+  const last = parseInt(store.get(KEYS.family), 10) || null;
+  const lastGroup = last ? parseInt(store.get(KEYS.group(last)), 10) || null : null;
   return `
   ${topbar()}
-  <main id="main" class="choose">
+  <main id="main" class="choose start">
     <div class="choose__text">
-      <h1>Zu welcher Familie gehörst du?</h1>
-      <p>Tipp auf deine Familie. Danach wählst du deinen Namen.</p>
+      <h1>Zu welcher Liste willst du?</h1>
+      <p>Tipp auf die Liste deiner Familie. Danach wählst du deinen Namen.</p>
     </div>
-    <div class="choose__list">
+    <div class="start__fams">
       ${fams
-        .map(
-          (f, i) => `
-        <button class="family-card paper" type="button" data-act="pick-family" data-id="${f.id}" style="--c:${PALETTE[(i * 3) % PALETTE.length]}">
-          <span class="paper__inner">
-            <span class="family-card__ball" aria-hidden="true">${esc(f.name.slice(0, 1).toUpperCase())}</span>
-            <span class="family-card__name"><small>Familie</small>${esc(f.name)}</span>
-          </span>
-        </button>`,
-        )
+        .map((f, i) => {
+          const own = lists.filter((r) => r.family_id === f.id);
+          return `
+        <section class="start__fam paper" style="--c:${PALETTE[(i * 3) % PALETTE.length]}">
+          <div class="paper__inner">
+            <h2 class="start__head"><span class="family-card__ball" aria-hidden="true">${esc(f.name.slice(0, 1).toUpperCase())}</span><span class="family-card__name"><small>Familie</small>${esc(f.name)}</span></h2>
+            ${
+              own.length
+                ? `<ul class="start__lists">${own
+                    .map((r) => {
+                      const facts = [exchangeText(r), budgetText(r) && `Budget ${budgetText(r)}`].filter(Boolean).join(' · ');
+                      return `<li><button class="start__list" type="button" data-act="pick-list" data-family="${f.id}" data-id="${r.id}">
+                        <span class="start__title">${esc(r.title)}${r.id === lastGroup ? '<span class="pill pill--last">zuletzt</span>' : ''}</span>
+                        ${facts ? `<span class="start__facts">${esc(facts)}</span>` : ''}
+                        <svg class="start__arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+                      </button></li>`;
+                    })
+                    .join('')}</ul>`
+                : `<p class="muted start__empty">Noch keine Liste. <button class="linklike" type="button" data-act="pick-family" data-id="${f.id}">Familie öffnen</button></p>`
+            }
+          </div>
+        </section>`;
+        })
         .join('')}
       ${fams.length ? '' : '<p class="empty">Es gibt noch keine Familie. Leg sie in der Verwaltung an.</p>'}
     </div>
@@ -1127,6 +1144,15 @@ function updateBrowseLinks() {
 }
 
 const actions = {
+  async 'pick-list'(el) {
+    setFamily(parseInt(el.dataset.family, 10));
+    setGroup(parseInt(el.dataset.id, 10));
+    S.draft = null; S.editing = null;
+    await refresh();
+    resetBrowse();
+    if (location.hash && location.hash !== '#/') location.hash = '#/';
+    if (sessionStorage.getItem(SHARE_KEY) && S.me) processShare();
+  },
   async 'pick-family'(el) {
     setFamily(parseInt(el.dataset.id, 10));
     S.draft = null; S.editing = null;
@@ -1777,6 +1803,12 @@ function processShare() {
 // ---------- Kleine Anleitung (Rentier bzw. Geschenk) ----------
 
 function tourSteps() {
+  if (!family()) {
+    return [
+      { sel: '.start__fams', title: 'Welche Liste?', text: 'Hier stehen alle Wunschlisten, sortiert nach Familie. Tipp auf die Liste, zu der du willst.' },
+      { sel: '.helper', title: 'Danach geht es weiter', text: 'Danach tippst du auf deinen Namen und gibst deinen Code ein. Drück dann noch einmal auf mich, dann zeige ich dir den Rest.' },
+    ];
+  }
   if (!S.me) {
     return [
       { sel: '.garland', title: 'Wer bist du?', text: `Jede${isXmas() ? ' Kugel' : 'r Kreis'} ist eine Person aus der Familie. Tipp auf deinen Namen und gib deinen Code ein.` },
@@ -1983,6 +2015,8 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && !b
 
 (async function start() {
   captureShare();
+  // Beim Öffnen immer fragen, zu welcher Liste es geht
+  if (!location.hash || location.hash === '#' || location.hash === '#/') S.family = null;
   if (!TEST && 'serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }

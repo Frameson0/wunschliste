@@ -138,7 +138,11 @@ async function state(env, { familyId, roundId, viewerId }) {
   const families = (await env.DB.prepare('SELECT id, name FROM families ORDER BY sort, id').all()).results;
   const family = families.find((f) => f.id === familyId) || (families.length === 1 ? families[0] : null);
   if (!family) {
-    return { viewer: viewerId || null, families, family: null, rounds: [], round: null, people: [], family_people: [], members: [], items: [], features };
+    // Startseite: alle aktiven Listen, nach Familie sortiert
+    const lists = (
+      await env.DB.prepare(`SELECT ${ROUND_COLS} FROM rounds WHERE is_current = 1 ORDER BY year DESC, exchange_date, id DESC`).all()
+    ).results;
+    return { viewer: viewerId || null, families, lists, family: null, rounds: [], round: null, people: [], family_people: [], members: [], items: [], features };
   }
   const rounds = (
     await env.DB.prepare(`SELECT ${ROUND_COLS} FROM rounds WHERE family_id = ? ORDER BY year DESC, id DESC`).bind(family.id).all()
