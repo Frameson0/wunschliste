@@ -908,3 +908,68 @@ body.has-sheet { overflow: hidden; }
 .item.is-bought .item__title a { text-decoration: line-through; text-decoration-thickness: 1.5px; }
 .tile-bought { margin-left: 10px; font-weight: 600; color: var(--fir); }
 .tile-bought::before { content: '✓ '; }
+
+/* ===== Familien & Gruppen ===== */
+.topbar__left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ctx {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: rgba(241, 245, 242, 0.12); color: var(--snow);
+  border: 1.5px solid rgba(241, 245, 242, 0.3); border-radius: 999px;
+  padding: 3px 10px 3px 12px; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+  max-width: 11rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctx:hover { border-color: var(--snow); }
+.ctx svg { width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+@media (max-width: 420px) { .whoami > span { display: none; } }
+
+.testbar {
+  background: var(--mustard); color: var(--fir); text-align: center;
+  font-size: 0.88rem; padding: 5px var(--gutter);
+}
+
+.choose { max-width: 760px; text-align: center; padding-top: 44px; }
+.choose__text h1 { font-size: clamp(2.2rem, 7vw, 4rem); }
+.choose__text p { margin-top: 14px; font-size: 1.12rem; color: var(--fir-soft); }
+.choose__text p + p { margin-top: 18px; }
+.choose__list { margin-top: 36px; display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.family-card, .group-card {
+  appearance: none; border: 0; background: none; padding: 0; cursor: pointer; text-align: left; color: var(--fir); width: 100%;
+}
+.family-card .paper__inner, .group-card .paper__inner { transition: transform 0.18s; }
+.family-card:hover .paper__inner, .group-card:hover .paper__inner { transform: translateY(-3px); }
+.family-card .paper__inner { display: flex; align-items: center; gap: 18px; padding-top: 30px; padding-bottom: 28px; }
+.family-card__ball {
+  flex: none; width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 1.7rem; font-weight: 720; color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  background:
+    radial-gradient(circle at 31% 28%, rgba(255, 255, 255, 0.42) 0 13%, transparent 14%),
+    radial-gradient(circle at 50% 120%, rgba(0, 0, 0, 0.16), transparent 60%),
+    var(--c);
+}
+.family-card__name { display: flex; flex-direction: column; font-size: 1.7rem; font-weight: 720; letter-spacing: -0.02em; line-height: 1.1; }
+.family-card__name small { font-size: 0.95rem; font-weight: 500; color: var(--fir-soft); letter-spacing: 0; }
+.group-card .paper__inner { display: flex; flex-direction: column; gap: 6px; }
+.group-card__year { font-size: 0.9rem; font-weight: 650; color: var(--berry); }
+.group-card__title { font-size: 1.45rem; font-weight: 720; letter-spacing: -0.02em; line-height: 1.15; }
+.group-card__facts { color: var(--fir-soft); font-size: 0.98rem; }
+
+.admin__tabs { margin: 4px 0 22px; }
+.admin__test .btn { margin-top: 12px; }
+.rounds-admin li.is-selected { background: linear-gradient(90deg, rgba(227, 168, 43, 0.14), transparent); margin: 0 -10px; padding-left: 10px; padding-right: 10px; border-radius: 8px; }
+.pill--year { background: var(--berry); margin-left: 0; margin-right: 4px; }
+.pill--muted { background: var(--mist-strong); color: var(--fir); }
+.person-row__join { grid-column: 1 / -1; font-size: 0.95rem; }
+
+/* Viele Personen (z. B. 9 bei Familie Kebel): am Handy in zwei Reihen versetzt hängen */
+@media (max-width: 700px) {
+  .garland--many { --ball: 36px; padding: 0 2px; }
+  .garland--many.garland--big { --ball: 44px; }
+  .garland--many .bauble__name { font-size: 0.8rem; margin-top: 4px; }
+  .garland--many li:nth-child(odd) .bauble__string { height: 12px !important; }
+  .garland--many li:nth-child(even) .bauble__string { height: 70px !important; }
+  .garland--many.garland--big li:nth-child(odd) .bauble__string { height: 16px !important; }
+  .garland--many.garland--big li:nth-child(even) .bauble__string { height: 84px !important; }
+}
+@media (max-width: 700px) {
+  .garland--many .bauble__name { flex-direction: column; align-items: center; gap: 1px; }
+}

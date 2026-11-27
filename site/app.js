@@ -2,7 +2,10 @@
 // Reines JavaScript ohne Build-Schritt. Daten kommen vom Cloudflare Worker (window.WICHTEL_API).
 
 const API = String(window.WICHTEL_API || '').replace(/\/+$/, '');
-const KEYS = { me: 'wichteln.me', admin: 'wichteln.admin' };
+// Die Testversion läuft unter /test/ auf derselben Adresse und bekommt eigene Speicher-Schlüssel
+const TEST = Boolean(window.WICHTEL_TEST);
+const PFX = TEST ? 'wichteln.test.' : 'wichteln.';
+const KEYS = { me: `${PFX}me`, admin: `${PFX}admin`, family: `${PFX}family`, group: (fid) => `${PFX}group.${fid}` };
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -11,9 +14,13 @@ const store = {
 
 const S = {
   data: null,
+  family: parseInt(store.get(KEYS.family), 10) || null,
   viewRound: null,
-  me: parseInt(store.get(KEYS.me), 10) || null,
-  adminKey: store.get(KEYS.admin) || '',
+  meStored: parseInt(store.get(KEYS.me), 10) || null,
+  me: null,         // gewählte Person, wenn sie in der angezeigten Gruppe mitmacht
+  // In der Testversion gilt auch das Passwort, mit dem du auf der Live-Seite angemeldet bist
+  adminKey: store.get(KEYS.admin) || (TEST ? store.get('wichteln.admin') || '' : ''),
+  needAdmin: false,
   adminOk: false,
   draft: null,      // neue Idee in Arbeit
   editing: null,    // id der Idee, die gerade bearbeitet wird
@@ -92,7 +99,7 @@ async function api(path, { method = 'GET', body, admin = false } = {}) {
   if (!API) throw new Error('Die Adresse der Wichtel-API fehlt in config.js.');
   const headers = {};
   if (body) headers['Content-Type'] = 'application/json';
-  if (admin) headers['X-Admin-Key'] = S.adminKey;
+  if (admin || TEST) headers['X-Admin-Key'] = S.adminKey;
   let res;
   try {
     res = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
@@ -103,6 +110,7 @@ async function api(path, { method = 'GET', body, admin = false } = {}) {
   if (!res.ok) {
     const e = new Error(data.error || `Fehler ${res.status}`);
     e.status = res.status;
+    if (data.admin_required) { S.needAdmin = true; S.adminOk = false; }
     throw e;
   }
   return data;
@@ -110,16 +118,37 @@ async function api(path, { method = 'GET', body, admin = false } = {}) {
 
 async function load() {
   const qs = new URLSearchParams();
-  if (S.viewRound) qs.set('round', S.viewRound);
-  if (S.me) qs.set('viewer', S.me);
-  S.data = await api(`/api/state${qs.toString() ? `?${qs}` : ''}`);
+  if (S.family) {
+    qs.set('family', S.family);
+    if (!S.viewRound) S.viewRound = parseInt(store.get(KEYS.group(S.family)), 10) || null;
+    if (S.viewRound) qs.set('round', S.viewRound);
+  }
+  if (S.meStored) qs.set('viewer', S.meStored);
+  const d = await api(`/api/state${qs.toString() ? `?${qs}` : ''}`);
+  S.data = d;
   S.error = null;
-  if (S.me && !S.data.people.some((p) => p.id === S.me)) setMe(null);
+  S.needAdmin = false;
+  if (d.family && d.family.id !== S.family) setFamily(d.family.id);
+  if (!d.family && S.family) setFamily(null);
+  if (S.viewRound && !d.rounds.some((r) => r.id === S.viewRound)) setGroup(null);
+  S.me = S.meStored && d.members.includes(S.meStored) ? S.meStored : null;
 }
 
 function setMe(id) {
+  S.meStored = id;
   S.me = id;
   store.set(KEYS.me, id ? String(id) : null);
+}
+
+function setFamily(id) {
+  S.family = id;
+  S.viewRound = null;
+  store.set(KEYS.family, id ? String(id) : null);
+}
+
+function setGroup(id) {
+  S.viewRound = id;
+  if (S.family) store.set(KEYS.group(S.family), id ? String(id) : null);
 }
 
 // ---------- abgeleitete Daten ----------
@@ -130,7 +159,12 @@ const people = () => (S.data ? S.data.people : []);
 const person = (id) => people().find((p) => p.id === id);
 const members = () => people().filter((p) => S.data.members.includes(p.id));
 const itemsOf = (id) => S.data.items.filter((i) => i.person_id === id);
-const currentRoundId = () => (S.data.rounds.find((r) => r.is_current) || {}).id;
+const family = () => S.data && S.data.family;
+const activeRounds = () => (S.data ? S.data.rounds.filter((r) => r.is_current) : []);
+const familyPeople = () => people().filter((p) => S.data.family_people.includes(p.id));
+// Mehrere aktive Gruppen und noch keine gewählt: erst fragen
+const needGroupChoice = () => Boolean(family() && !S.viewRound && activeRounds().length > 1);
+const roundLabel = (r) => (String(r.title).includes(String(r.year)) || String(r.title).includes(String(r.year).slice(2)) ? r.title : `${r.title} (${r.year})`);
 
 function route() {
   const h = location.hash.replace(/^#\/?/, '');
@@ -146,7 +180,7 @@ function garland(list, { activeId = null, big = false, pick = false } = {}) {
   const drops = [26, 50, 34, 58, 30, 46, 38, 54];
   const n = list.length || 1;
   return `
-  <nav class="garland ${big ? 'garland--big' : ''} ${S.firstPaint ? 'is-entering' : ''}" aria-label="${pick ? 'Wer bist du?' : 'Wunschzettel der Familie'}">
+  <nav class="garland ${big ? 'garland--big' : ''} ${list.length > 7 ? 'garland--many' : ''} ${S.firstPaint ? 'is-entering' : ''}" aria-label="${pick ? 'Wer bist du?' : 'Wunschzettel der Familie'}">
     <svg class="garland__rope" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><path d="M-2,1 Q50,10 102,1" vector-effect="non-scaling-stroke"/></svg>
     <ul>
       ${list
@@ -174,8 +208,12 @@ function garland(list, { activeId = null, big = false, pick = false } = {}) {
 function topbar() {
   const me = person(S.me);
   return `
+  ${TEST ? '<div class="testbar" role="note"><strong>Testversion</strong> · nur für dich sichtbar · eigene Testdaten</div>' : ''}
   <header class="topbar">
-    <a class="brand" href="#/">Wichteln</a>
+    <span class="topbar__left">
+      <a class="brand" href="#/">Wichteln</a>
+      ${family() ? `<button class="ctx" type="button" data-act="switch-family" aria-label="Familie wechseln, gerade: ${esc(family().name)}">${esc(family().name)}<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3"/></svg></button>` : ''}
+    </span>
     ${
       me
         ? `<div class="whoami"><span>Du bist <strong>${esc(me.name)}</strong></span><button class="btn btn--ghost btn--small" data-act="switch">Wechseln</button></div>`
@@ -186,9 +224,9 @@ function topbar() {
 
 function archiveBanner() {
   if (!round() || round().is_current) return '';
-  const cur = S.data.rounds.find((r) => r.is_current);
-  return `<div class="archive" role="note">Du schaust dir <strong>${esc(round().title)}</strong> an. Ältere Wunschzettel lassen sich nicht mehr ändern.
-    ${cur ? `<button class="btn btn--small btn--ghost-dark" data-act="round" data-id="">Zurück zu ${esc(cur.title)}</button>` : ''}</div>`;
+  const cur = activeRounds()[0];
+  return `<div class="archive" role="note"><strong>${esc(round().title)}</strong> ist archiviert. Die Wunschzettel lassen sich nicht mehr ändern.
+    ${cur ? `<button class="btn btn--small btn--ghost-dark" data-act="round" data-id="${cur.id}">Zu ${esc(cur.title)}</button>` : ''}</div>`;
 }
 
 const REINDEER_SVG = `
@@ -227,9 +265,9 @@ function footer() {
   <footer class="footer">
     ${
       rounds.length > 1
-        ? `<label class="footer__rounds">Jahr
+        ? `<label class="footer__rounds">Gruppe
             <select data-act="round-select">
-              ${rounds.map((r) => `<option value="${r.id}" ${round() && r.id === round().id ? 'selected' : ''}>${esc(r.title)}</option>`).join('')}
+              ${rounds.map((r) => `<option value="${r.id}" ${round() && r.id === round().id ? 'selected' : ''}>${esc(roundLabel(r))}${r.is_current ? '' : ' · archiviert'}</option>`).join('')}
             </select></label>`
         : '<span></span>'
     }
@@ -246,6 +284,91 @@ function thumb(it, size = '') {
 
 // ---------- Ansichten ----------
 
+function viewTestLogin() {
+  return `
+  <div class="testbar" role="note"><strong>Testversion</strong> · nur für dich sichtbar</div>
+  <main id="main" class="admin">
+    <h1>Testversion</h1>
+    <section class="paper"><div class="paper__inner">
+      <p class="muted">Die Testversion ist nur mit dem Admin-Passwort zugänglich. Sie hat eigene Testdaten, an der echten Seite ändert sich nichts.</p>
+      <form data-form="admin-login" class="stack">
+        <label class="field"><span>Admin-Passwort</span><input type="password" name="key" autocomplete="current-password" required></label>
+        <button class="btn btn--primary" type="submit">Anmelden</button>
+      </form>
+    </div></section>
+    <p><a href="../">Zur echten Seite</a></p>
+  </main>`;
+}
+
+function viewFamilyPicker() {
+  const fams = S.data.families;
+  return `
+  ${topbar()}
+  <main id="main" class="choose">
+    <div class="choose__text">
+      <h1>Zu welcher Familie gehörst du?</h1>
+      <p>Tipp auf deine Familie. Danach wählst du deinen Namen.</p>
+    </div>
+    <div class="choose__list">
+      ${fams
+        .map(
+          (f, i) => `
+        <button class="family-card paper" type="button" data-act="pick-family" data-id="${f.id}" style="--c:${PALETTE[(i * 3) % PALETTE.length]}">
+          <span class="paper__inner">
+            <span class="family-card__ball" aria-hidden="true">${esc(f.name.slice(0, 1).toUpperCase())}</span>
+            <span class="family-card__name"><small>Familie</small>${esc(f.name)}</span>
+          </span>
+        </button>`,
+        )
+        .join('')}
+      ${fams.length ? '' : '<p class="empty">Es gibt noch keine Familie. Leg sie in der Verwaltung an.</p>'}
+    </div>
+  </main>
+  ${footer()}`;
+}
+
+function viewGroupPicker() {
+  const list = activeRounds();
+  return `
+  ${topbar()}
+  <main id="main" class="choose">
+    <div class="choose__text">
+      <h1>Welche Liste?</h1>
+      <p>In der Familie ${esc(family().name)} gibt es gerade mehrere Listen. Tipp auf die, die du suchst.</p>
+    </div>
+    <div class="choose__list">
+      ${list
+        .map((r) => {
+          const facts = [budgetText(r) && `Budget ${budgetText(r)}`, exchangeText(r)].filter(Boolean).join(' · ');
+          return `
+        <button class="group-card paper" type="button" data-act="round" data-id="${r.id}">
+          <span class="paper__inner">
+            <span class="group-card__year">${r.year}</span>
+            <span class="group-card__title">${esc(r.title)}</span>
+            ${facts ? `<span class="group-card__facts">${esc(facts)}</span>` : ''}
+          </span>
+        </button>`;
+        })
+        .join('')}
+    </div>
+  </main>
+  ${footer()}`;
+}
+
+function viewNoGroup() {
+  return `
+  ${topbar()}
+  <main id="main" class="choose">
+    <div class="choose__text">
+      <h1>Familie ${esc(family().name)}</h1>
+      <p>Für die Familie ${esc(family().name)} gibt es noch keine Liste.${S.adminOk ? '' : ' Sobald Eric eine anlegt, geht es hier los.'}</p>
+      ${S.adminOk ? '<p><a class="btn btn--primary" href="#/admin">Gruppe anlegen</a></p>' : ''}
+      <p><button class="btn btn--ghost" type="button" data-act="switch-family">Andere Familie wählen</button></p>
+    </div>
+  </main>
+  ${footer()}`;
+}
+
 function viewPicker() {
   const list = members();
   return `
@@ -255,7 +378,7 @@ function viewPicker() {
     <div class="picker__text">
       <h1>Wer bist du?</h1>
       <p>Tipp auf deine Kugel. Danach füllst du deinen Wunschzettel und schaust, was sich die anderen wünschen.</p>
-      ${list.length ? '' : '<p class="empty">Für dieses Jahr ist noch niemand eingetragen. Das geht in der Verwaltung.</p>'}
+      ${list.length ? '' : '<p class="empty">In dieser Gruppe ist noch niemand eingetragen. Das geht in der Verwaltung.</p>'}
     </div>
   </main>
   ${footer()}`;
@@ -613,15 +736,160 @@ function viewAdmin() {
       <p><a href="#/">Zurück zu den Wunschzetteln</a></p>
     </main>`;
   }
-  const r = round();
-  const cur = S.data.rounds.find((x) => x.is_current) || r;
-  const allPeople = people();
-  const memberSet = new Set(S.data.members);
-  const nextYear = Math.max(...S.data.rounds.map((x) => x.year), new Date().getFullYear() - 1) + 1;
+  const fam = family();
   const colorSelect = (name, value) => `
     <span class="swatches" role="radiogroup" aria-label="Farbe">
       ${PALETTE.map((c) => `<label class="swatch" style="--c:${c}"><input type="radio" name="${name}" value="${c}" ${c.toLowerCase() === String(value).toLowerCase() ? 'checked' : ''}><span class="sr">${c}</span></label>`).join('')}
     </span>`;
+  const famTabs = `
+    <div class="chips admin__tabs" role="group" aria-label="Familie">
+      ${S.data.families.map((f) => `<button type="button" class="chip" data-act="admin-family" data-id="${f.id}" aria-pressed="${fam && f.id === fam.id}">Familie ${esc(f.name)}</button>`).join('')}
+    </div>`;
+  const testLink = !TEST
+    ? `<section class="paper admin__test"><div class="paper__inner">
+        <h2>Testversion</h2>
+        <p class="muted">Neue Funktionen probierst du hier aus, bevor sie für alle live gehen. Sie hat eigene Testdaten und ist nur mit deinem Admin-Passwort sichtbar.</p>
+        <a class="btn btn--ghost" href="./test/#/admin">Testversion öffnen</a>
+      </div></section>`
+    : `<p class="note">Du bist in der Testversion. Änderungen hier betreffen nur die Testdaten. <a href="../#/admin">Zur echten Verwaltung</a></p>`;
+
+  const familiesBox = `
+    <section class="paper"><div class="paper__inner">
+      <h2>Familien</h2>
+      <ul class="people-admin">
+        ${S.data.families
+          .map(
+            (f) => `
+          <li><form data-form="admin-family" data-id="${f.id}" class="person-row">
+            <input name="name" value="${esc(f.name)}" maxlength="40" aria-label="Name der Familie">
+            <span class="person-row__actions">
+              <button class="btn btn--ghost btn--small" type="submit">Speichern</button>
+              <button class="btn btn--ghost btn--small btn--danger" type="button" data-act="admin-del-family" data-id="${f.id}">Löschen</button>
+            </span>
+          </form></li>`,
+          )
+          .join('')}
+      </ul>
+      <form data-form="admin-add-family" class="person-row person-row--new">
+        <input name="name" maxlength="40" placeholder="Neue Familie" aria-label="Name der neuen Familie" required>
+        <span class="person-row__actions"><button class="btn btn--primary btn--small" type="submit">Hinzufügen</button></span>
+      </form>
+    </div></section>`;
+
+  if (!fam) {
+    return `
+    ${topbar()}
+    <main id="main" class="admin">
+      <div class="admin__head"><h1>Verwaltung</h1><button class="btn btn--ghost btn--small" data-act="admin-logout">Abmelden</button></div>
+      ${famTabs}
+      <p class="muted">Wähl oben eine Familie aus.</p>
+      ${familiesBox}
+      ${testLink}
+    </main>`;
+  }
+
+  const r = round();
+  const famPeople = familyPeople();
+  const thisYear = new Date().getFullYear();
+  const memberChecks = (selected) =>
+    `<div class="checks">${people()
+      .filter((p) => S.data.family_people.includes(p.id) || selected.has(p.id))
+      .map((p) => `<label class="check"><input type="checkbox" name="member" value="${p.id}" ${selected.has(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`)
+      .join('')}</div>`;
+
+  const groupsBox = `
+    <section class="paper"><div class="paper__inner">
+      <h2>Gruppen der Familie ${esc(fam.name)}</h2>
+      ${
+        S.data.rounds.length
+          ? `<ul class="rounds-admin">
+          ${S.data.rounds
+            .map(
+              (x) => `<li class="${r && x.id === r.id ? 'is-selected' : ''}"><span><span class="pill pill--year">${x.year}</span> ${esc(x.title)}${x.is_current ? ' <span class="pill">aktiv</span>' : ' <span class="pill pill--muted">archiviert</span>'}</span>
+            <span class="person-row__actions">
+              ${r && x.id === r.id ? '<span class="muted">wird unten bearbeitet</span>' : `<button class="btn btn--ghost btn--small" data-act="round" data-id="${x.id}">Bearbeiten</button>`}
+              <button class="btn btn--ghost btn--small" data-act="admin-toggle-round" data-id="${x.id}">${x.is_current ? 'Archivieren' : 'Wieder aktiv'}</button>
+              <button class="btn btn--ghost btn--small btn--danger" data-act="admin-del-round" data-id="${x.id}">Löschen</button>
+            </span></li>`,
+            )
+            .join('')}
+        </ul>
+        <p class="hint">Aktive Gruppen sehen alle in der Familie. Sind mehrere aktiv, wählt man beim Öffnen die passende. Archivierte bleiben zum Nachschauen über „Gruppe“ ganz unten.</p>`
+          : '<p class="muted">Diese Familie hat noch keine Gruppe. Leg unten die erste an.</p>'
+      }
+    </div></section>`;
+
+  const editBox = r
+    ? `
+    <section class="paper"><div class="paper__inner">
+      <h2>${esc(r.title)} bearbeiten</h2>
+      <form data-form="admin-round" data-id="${r.id}" class="stack">
+        <div class="grid2">
+          <label class="field"><span>Name der Gruppe</span><input name="title" value="${esc(r.title)}" maxlength="80"></label>
+          <label class="field"><span>Jahr</span><input name="year" type="number" value="${r.year}"></label>
+          <label class="field"><span>Bescherung</span><input name="exchange_date" type="date" value="${esc(r.exchange_date || '')}"></label>
+          <span></span>
+          <label class="field"><span>Budget von (€)</span><input name="budget_min" type="number" min="0" value="${r.budget_min ?? ''}"></label>
+          <label class="field"><span>Budget bis (€)</span><input name="budget_max" type="number" min="0" value="${r.budget_max ?? ''}"></label>
+        </div>
+        <fieldset class="field"><legend>Wer macht mit?</legend>${memberChecks(new Set(S.data.members))}</fieldset>
+        <div><button class="btn btn--primary" type="submit">Gruppe speichern</button></div>
+      </form>
+    </div></section>`
+    : '';
+
+  const newBox = `
+    <section class="paper"><div class="paper__inner">
+      <h2>Neue Gruppe anlegen</h2>
+      <p class="muted">Zum Beispiel fürs Wichteln oder eine Wunschliste zu Weihnachten oder zum Geburtstag. Ältere Gruppen bleiben erhalten.</p>
+      <form data-form="admin-new-round" class="stack">
+        <div class="grid2">
+          <label class="field"><span>Name der Gruppe</span><input name="title" maxlength="80" placeholder="z. B. Wichteln ${esc(fam.name)} ${String(thisYear).slice(2)}" required></label>
+          <label class="field"><span>Jahr</span><input name="year" type="number" value="${thisYear}" required></label>
+          <label class="field"><span>Bescherung</span><input name="exchange_date" type="date" value="${thisYear}-12-24"></label>
+          <span></span>
+          <label class="field"><span>Budget von (€)</span><input name="budget_min" type="number" min="0"></label>
+          <label class="field"><span>Budget bis (€)</span><input name="budget_max" type="number" min="0"></label>
+        </div>
+        <fieldset class="field"><legend>Wer macht mit?</legend>${memberChecks(new Set(famPeople.map((p) => p.id)))}</fieldset>
+        ${
+          S.data.rounds.length
+            ? `<label class="field"><span>Wunschzettel übernehmen aus</span>
+            <select name="copy"><option value="">Nein, alle fangen leer an</option>
+              ${S.data.rounds.map((x) => `<option value="${x.id}">${esc(roundLabel(x))}</option>`).join('')}
+            </select></label>`
+            : '<input type="hidden" name="copy" value="">'
+        }
+        <div><button class="btn btn--primary" type="submit">Gruppe anlegen</button></div>
+      </form>
+    </div></section>`;
+
+  const peopleBox = `
+    <section class="paper"><div class="paper__inner">
+      <h2>Personen der Familie ${esc(fam.name)}</h2>
+      <ul class="people-admin">
+        ${famPeople
+          .map(
+            (p) => `
+          <li><form data-form="admin-person" data-id="${p.id}" class="person-row">
+            <input name="name" value="${esc(p.name)}" maxlength="40" aria-label="Name">
+            ${colorSelect(`color-${p.id}`, p.color)}
+            <span class="person-row__actions">
+              <button class="btn btn--ghost btn--small" type="submit">Speichern</button>
+              <button class="btn btn--ghost btn--small btn--danger" type="button" data-act="admin-del-person" data-id="${p.id}">Entfernen</button>
+            </span>
+          </form></li>`,
+          )
+          .join('')}
+      </ul>
+      <form data-form="admin-add-person" class="person-row person-row--new">
+        <input name="name" maxlength="40" placeholder="Neue Person" aria-label="Name der neuen Person" required>
+        ${colorSelect('color-new', PALETTE[famPeople.length % PALETTE.length])}
+        <span class="person-row__actions"><button class="btn btn--primary btn--small" type="submit">Hinzufügen</button></span>
+        ${r && r.is_current ? `<label class="check person-row__join"><input type="checkbox" name="join" value="${r.id}" checked> macht bei ${esc(r.title)} mit</label>` : ''}
+      </form>
+      <p class="hint">Wer in mehreren Familien ist (wie Eric und Dana), ist dieselbe Person: „Gut zu wissen“ gilt überall, der Wunschzettel ist pro Gruppe eigen.</p>
+    </div></section>`;
 
   return `
   ${topbar()}
@@ -630,83 +898,13 @@ function viewAdmin() {
       <h1>Verwaltung</h1>
       <button class="btn btn--ghost btn--small" data-act="admin-logout">Abmelden</button>
     </div>
-
-    ${r.id !== cur.id ? `<p class="note">Du bearbeitest gerade ${esc(r.title)}, nicht das aktuelle Jahr.</p>` : ''}
-
-    <section class="paper"><div class="paper__inner">
-      <h2>${esc(r.title)}</h2>
-      <form data-form="admin-round" data-id="${r.id}" class="stack">
-        <div class="grid2">
-          <label class="field"><span>Name der Runde</span><input name="title" value="${esc(r.title)}" maxlength="80"></label>
-          <label class="field"><span>Bescherung</span><input name="exchange_date" type="date" value="${esc(r.exchange_date || '')}"></label>
-          <label class="field"><span>Budget von (€)</span><input name="budget_min" type="number" min="0" value="${r.budget_min ?? ''}"></label>
-          <label class="field"><span>Budget bis (€)</span><input name="budget_max" type="number" min="0" value="${r.budget_max ?? ''}"></label>
-        </div>
-        <fieldset class="field"><legend>Wer macht mit?</legend>
-          <div class="checks">${allPeople.map((p) => `<label class="check"><input type="checkbox" name="member" value="${p.id}" ${memberSet.has(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('')}</div>
-        </fieldset>
-        <div><button class="btn btn--primary" type="submit">Runde speichern</button></div>
-      </form>
-    </div></section>
-
-    <section class="paper"><div class="paper__inner">
-      <h2>Personen</h2>
-      <ul class="people-admin">
-        ${allPeople
-          .map(
-            (p) => `
-          <li><form data-form="admin-person" data-id="${p.id}" class="person-row">
-            <input name="name" value="${esc(p.name)}" maxlength="40" aria-label="Name">
-            ${colorSelect(`color-${p.id}`, p.color)}
-            <span class="person-row__actions">
-              <button class="btn btn--ghost btn--small" type="submit">Speichern</button>
-              <button class="btn btn--ghost btn--small btn--danger" type="button" data-act="admin-del-person" data-id="${p.id}">Löschen</button>
-            </span>
-          </form></li>`,
-          )
-          .join('')}
-      </ul>
-      <form data-form="admin-add-person" class="person-row person-row--new">
-        <input name="name" maxlength="40" placeholder="Neue Person" aria-label="Name der neuen Person" required>
-        ${colorSelect('color-new', PALETTE[allPeople.length % PALETTE.length])}
-        <span class="person-row__actions"><button class="btn btn--primary btn--small" type="submit">Hinzufügen</button></span>
-      </form>
-    </div></section>
-
-    <section class="paper"><div class="paper__inner">
-      <h2>Neues Jahr starten</h2>
-      <p class="muted">Die neue Runde wird zur aktuellen. Ältere Runden bleiben zum Nachschauen erhalten.</p>
-      <form data-form="admin-new-round" class="stack">
-        <div class="grid2">
-          <label class="field"><span>Jahr</span><input name="year" type="number" value="${nextYear}" required></label>
-          <label class="field"><span>Bescherung</span><input name="exchange_date" type="date" value="${nextYear}-12-24"></label>
-          <label class="field"><span>Budget von (€)</span><input name="budget_min" type="number" min="0" value="${cur.budget_min ?? ''}"></label>
-          <label class="field"><span>Budget bis (€)</span><input name="budget_max" type="number" min="0" value="${cur.budget_max ?? ''}"></label>
-        </div>
-        <label class="check"><input type="checkbox" name="copy" value="${cur.id}"> Wunschzettel aus ${esc(cur.title)} übernehmen</label>
-        <div><button class="btn btn--primary" type="submit">Neues Jahr starten</button></div>
-      </form>
-    </div></section>
-
-    ${
-      S.data.rounds.length > 1
-        ? `<section class="paper"><div class="paper__inner">
-        <h2>Alle Runden</h2>
-        <ul class="rounds-admin">
-          ${S.data.rounds
-            .map(
-              (x) => `<li><span>${esc(x.title)}${x.is_current ? ' <span class="pill">aktuell</span>' : ''}</span>
-            <span class="person-row__actions">
-              ${x.id !== r.id ? `<button class="btn btn--ghost btn--small" data-act="round" data-id="${x.id}">Bearbeiten</button>` : ''}
-              ${x.is_current ? '' : `<button class="btn btn--ghost btn--small" data-act="admin-make-current" data-id="${x.id}">Zur aktuellen machen</button>`}
-              <button class="btn btn--ghost btn--small btn--danger" data-act="admin-del-round" data-id="${x.id}">Löschen</button>
-            </span></li>`,
-            )
-            .join('')}
-        </ul>
-      </div></section>`
-        : ''
-    }
+    ${famTabs}
+    ${groupsBox}
+    ${editBox}
+    ${newBox}
+    ${peopleBox}
+    ${familiesBox}
+    ${testLink}
     <p><a href="#/">Zurück zu den Wunschzetteln</a></p>
   </main>`;
 }
@@ -724,15 +922,23 @@ function render() {
       </main>`;
     return;
   }
+  if (TEST && (S.needAdmin || !S.adminKey)) {
+    app.innerHTML = viewTestLogin();
+    document.title = 'Test – Wichteln';
+    return;
+  }
   if (!S.data) return;
   const r = route();
   let html;
   if (r.view === 'admin') html = viewAdmin();
+  else if (!family()) html = viewFamilyPicker();
+  else if (!round()) html = viewNoGroup();
+  else if (needGroupChoice()) html = viewGroupPicker();
   else if (!S.me) html = viewPicker();
   else if (r.view === 'person') html = viewPerson(r.id);
   else html = viewHome();
   app.innerHTML = html;
-  document.title = r.view === 'person' && person(r.id) ? `${person(r.id).name} – Wichteln` : 'Wichteln';
+  document.title = `${TEST ? 'Test – ' : ''}${r.view === 'person' && person(r.id) ? `${person(r.id).name} – ` : ''}Wichteln`;
   if (S.firstPaint) requestAnimationFrame(() => setTimeout(() => (S.firstPaint = false), 50));
 }
 
@@ -742,11 +948,12 @@ function busyTyping() {
 }
 
 async function refresh({ quiet = false } = {}) {
+  if (TEST && !S.adminKey) return render();
   try {
     await load();
   } catch (e) {
-    if (!quiet) toast(e.message, 'is-error');
-    if (!S.data) S.error = e.message;
+    if (!quiet && !S.needAdmin) toast(e.message, 'is-error');
+    if (!S.data && !S.needAdmin) S.error = e.message;
   }
   render();
 }
@@ -794,6 +1001,26 @@ function updateBrowseLinks() {
 }
 
 const actions = {
+  async 'pick-family'(el) {
+    setFamily(parseInt(el.dataset.id, 10));
+    S.draft = null; S.editing = null;
+    await refresh();
+    resetBrowse();
+    if (location.hash && location.hash !== '#/') location.hash = '#/';
+    render();
+  },
+  async 'switch-family'() {
+    setFamily(null);
+    S.draft = null; S.editing = null;
+    if (S.sheet.open) closeSheet();
+    if (location.hash && location.hash !== '#/' && !location.hash.startsWith('#/admin')) location.hash = '#/';
+    await refresh();
+  },
+  async 'admin-family'(el) {
+    setFamily(parseInt(el.dataset.id, 10));
+    await refresh();
+    resetBrowse();
+  },
   async pick(el) {
     setMe(parseInt(el.dataset.id, 10));
     if (sessionStorage.getItem(SHARE_KEY)) processShare();
@@ -876,8 +1103,7 @@ const actions = {
   },
   reload() { refresh(); },
   async round(el) {
-    const id = parseInt(el.dataset.id, 10) || null;
-    S.viewRound = id && id !== currentRoundId() ? id : null;
+    setGroup(parseInt(el.dataset.id, 10) || null);
     S.draft = null; S.editing = null;
     await refresh();
     resetBrowse();
@@ -936,21 +1162,26 @@ const actions = {
   },
   async 'admin-del-person'(el) {
     const p = person(parseInt(el.dataset.id, 10));
-    if (!confirm(`${p.name} löschen? Alle Wunschzettel von ${p.name} werden dabei mitgelöscht, auch aus früheren Jahren.`)) return;
-    await adminCall(`/api/admin/people/${p.id}`, { method: 'DELETE' }, `${p.name} gelöscht`);
-    if (S.me === p.id) setMe(null);
+    const fam = family();
+    if (!confirm(`${p.name} aus der Familie ${fam.name} entfernen? Die Wunschzettel von ${p.name} in allen Gruppen dieser Familie werden dabei gelöscht.`)) return;
+    const res = await adminCall(`/api/admin/people/${p.id}?family=${fam.id}`, { method: 'DELETE' }, `${p.name} ist nicht mehr in der Familie ${fam.name}`);
+    if (res && res.deleted && S.meStored === p.id) setMe(null);
   },
-  async 'admin-make-current'(el) {
-    await adminCall(`/api/admin/rounds/${el.dataset.id}`, { method: 'PATCH', body: { is_current: true } }, 'Ist jetzt die aktuelle Runde');
-    S.viewRound = null;
-    await refresh();
+  async 'admin-toggle-round'(el) {
+    const r = S.data.rounds.find((x) => x.id === parseInt(el.dataset.id, 10));
+    await adminCall(`/api/admin/rounds/${r.id}`, { method: 'PATCH', body: { is_current: !r.is_current } }, r.is_current ? `${r.title} ist archiviert` : `${r.title} ist wieder aktiv`);
   },
   async 'admin-del-round'(el) {
     const r = S.data.rounds.find((x) => x.id === parseInt(el.dataset.id, 10));
     if (!confirm(`${r.title} mit allen Wunschzetteln endgültig löschen?`)) return;
+    if (S.viewRound === r.id) setGroup(null);
     await adminCall(`/api/admin/rounds/${r.id}`, { method: 'DELETE' }, `${r.title} gelöscht`);
-    S.viewRound = null;
-    await refresh();
+  },
+  async 'admin-del-family'(el) {
+    const f = S.data.families.find((x) => x.id === parseInt(el.dataset.id, 10));
+    if (!confirm(`Familie ${f.name} löschen?`)) return;
+    const res = await adminCall(`/api/admin/families/${f.id}`, { method: 'DELETE' }, `Familie ${f.name} gelöscht`);
+    if (res && S.family === f.id) { setFamily(null); await refresh(); }
   },
 };
 
@@ -1017,8 +1248,10 @@ const forms = {
     try {
       await api('/api/admin/check', { method: 'POST', admin: true });
       S.adminOk = true;
+      S.needAdmin = false;
       store.set(KEYS.admin, S.adminKey);
-      render();
+      if (TEST || !S.data) await refresh();
+      else render();
     } catch (e) { toast(e.message, 'is-error'); }
   },
   async 'admin-round'(f) {
@@ -1027,9 +1260,10 @@ const forms = {
       exchange_date: f.exchange_date.value,
       budget_min: f.budget_min.value,
       budget_max: f.budget_max.value,
+      year: f.year.value,
       member_ids: [...f.querySelectorAll('[name="member"]:checked')].map((c) => parseInt(c.value, 10)),
     };
-    await adminCall(`/api/admin/rounds/${f.dataset.id}`, { method: 'PATCH', body }, 'Runde gespeichert');
+    await adminCall(`/api/admin/rounds/${f.dataset.id}`, { method: 'PATCH', body }, 'Gruppe gespeichert');
     resetBrowse();
   },
   async 'admin-person'(f) {
@@ -1039,27 +1273,42 @@ const forms = {
   },
   async 'admin-add-person'(f) {
     const color = (f.querySelector('[name="color-new"]:checked') || {}).value;
-    await adminCall('/api/admin/people', { method: 'POST', body: { name: f.name.value, color } }, `${f.name.value} ist dabei`);
+    const join = f.join && f.join.checked ? parseInt(f.join.value, 10) : null;
+    const name = f.name.value.trim();
+    try {
+      const res = await api('/api/admin/people', { method: 'POST', admin: true, body: { name, color, family_id: family().id, join_round_id: join } });
+      toast(res.existed ? `${res.name} gab es schon und ist jetzt auch in der Familie ${family().name}` : `${res.name} ist dabei`);
+      await refresh();
+    } catch (e) { if (e.status === 401) { S.adminOk = false; render(); } toast(e.message, 'is-error'); }
   },
   async 'admin-new-round'(f) {
-    const year = parseInt(f.year.value, 10);
+    const title = f.title.value.trim();
+    if (!title) return f.title.focus();
     const res = await adminCall(
       '/api/admin/rounds',
       {
         method: 'POST',
         body: {
-          year,
-          title: `Weihnachten ${year}`,
+          family_id: family().id,
+          title,
+          year: parseInt(f.year.value, 10),
           exchange_date: f.exchange_date.value,
           budget_min: f.budget_min.value,
           budget_max: f.budget_max.value,
-          member_ids: S.data.members,
-          copy_items_from: f.copy.checked ? parseInt(f.copy.value, 10) : null,
+          member_ids: [...f.querySelectorAll('[name="member"]:checked')].map((c) => parseInt(c.value, 10)),
+          copy_items_from: parseInt(f.copy.value, 10) || null,
         },
       },
-      `Weihnachten ${year} ist gestartet`,
+      `${title} ist angelegt`,
     );
-    if (res) { S.viewRound = null; await refresh(); resetBrowse(); }
+    if (res) { setGroup(res.id); await refresh(); resetBrowse(); }
+  },
+  async 'admin-family'(f) {
+    await adminCall(`/api/admin/families/${f.dataset.id}`, { method: 'PATCH', body: { name: f.name.value } }, 'Gespeichert');
+  },
+  async 'admin-add-family'(f) {
+    const res = await adminCall('/api/admin/families', { method: 'POST', body: { name: f.name.value } }, `Familie ${f.name.value.trim()} ist angelegt`);
+    if (res) { setFamily(res.id); await refresh(); }
   },
 };
 
@@ -1467,6 +1716,11 @@ document.addEventListener('change', (ev) => {
 
 document.addEventListener('input', (ev) => {
   const t = ev.target;
+  // Neue Gruppe: Bescherungsdatum wandert mit dem Jahr mit
+  if (t.name === 'year' && t.form && t.form.dataset.form === 'admin-new-round' && /^\d{4}$/.test(t.value)) {
+    const d = t.form.exchange_date;
+    if (d.value) d.value = `${t.value}${d.value.slice(4)}`;
+  }
   if (t.id === 'sheet-q') S.sheet.q = t.value;
   if (t.dataset.browse) {
     S.browse[t.dataset.browse] = t.value;
@@ -1493,6 +1747,7 @@ window.addEventListener('popstate', () => {
 });
 
 window.addEventListener('hashchange', () => {
+  if (S.tour) endTour();
   S.draft = null;
   S.editing = null;
   render();
@@ -1507,7 +1762,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && !b
 
 (async function start() {
   captureShare();
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  if (!TEST && 'serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
   window.addEventListener('beforeinstallprompt', (e) => {
@@ -1516,13 +1771,17 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && !b
     if (S.shareHelp) render();
   });
   try {
-    await load();
-    resetBrowse();
     if (S.adminKey) {
       try { await api('/api/admin/check', { method: 'POST', admin: true }); S.adminOk = true; } catch { S.adminOk = false; }
     }
+    if (!TEST || S.adminOk) {
+      await load();
+      resetBrowse();
+    } else {
+      S.needAdmin = true;
+    }
   } catch (e) {
-    S.error = e.message;
+    if (!S.needAdmin) S.error = e.message;
   }
   render();
   processShare();

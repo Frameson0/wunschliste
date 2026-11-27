@@ -8,3 +8,15 @@ binding = "DB"
 database_name = "wichteln"
 database_id = "f53dc094-aa80-4306-9b22-18d5478fcda4"
 migrations_dir = "migrations"
+
+# Testversion: eigener Worker und eigene Datenbank, nur mit Admin-Passwort nutzbar
+[env.test]
+name = "wichteln-api-test"
+workers_dev = true
+vars = { TEST_MODE = "1" }
+
+[[env.test.d1_databases]]
+binding = "DB"
+database_name = "wichteln-test"
+database_id = "215ca0c1-7a40-4b3d-afe5-6f84a0affaf7"
+migrations_dir = "migrations"
